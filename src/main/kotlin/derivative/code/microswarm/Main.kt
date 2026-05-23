@@ -10,6 +10,7 @@ import javafx.geometry.Pos
 import javafx.scene.Scene
 import javafx.scene.canvas.Canvas
 import javafx.scene.control.Button
+import javafx.scene.control.CheckBox
 import javafx.scene.control.ComboBox
 import javafx.scene.control.Label
 import javafx.scene.control.ScrollPane
@@ -45,6 +46,18 @@ class Main : Application() {
     companion object {
         var CANVAS_X = 1000.0
         var CANVAS_Y = 1000.0
+
+        @Volatile
+        var AVG_SIM_TICK_TIME = 0
+
+        @Volatile
+        var MAX_SIM_TICK_TIME = 0
+        @Volatile
+        var TICKS_OVER_12 = 0
+        @Volatile
+        var TICKS_OVER_16 = 0
+        @Volatile
+        var TICKS_OVER_20 = 0
 
         @Volatile
         var SELECTED_AGENT_ID = 0
@@ -137,10 +150,6 @@ class Main : Application() {
 
         val startBtn = Button() // Start/Pause/Resume btn
         startBtn.text = "Start"
-        startBtn.setOnAction {
-            RUNNING = !RUNNING
-            startBtn.text = if (RUNNING) "Pause" else "Resume"
-        }
 
         val resetBtn = Button()
         resetBtn.text = "Reset"
@@ -154,7 +163,28 @@ class Main : Application() {
         loadBtn.text = "Load"
         loadBtn.isDisable = true
 
-        topBar.children.addAll(startBtn, resetBtn, saveBtn, loadBtn)
+        val topBarSpacer = Region()
+        HBox.setHgrow(topBarSpacer, Priority.ALWAYS)
+
+        val multiThreadToggle = CheckBox("Multi-thread: Enabled").apply {
+            textFill = Color.rgb(220, 225, 235)
+            isSelected = true
+            selectedProperty().addListener { _, _, selected ->
+                if (!RUNNING) {
+                    simulation.multiThreaded = selected
+                    text = if (selected) "Multi-thread: Enabled" else "Multi-thread: Disabled"
+                }
+            }
+        }
+
+
+        startBtn.setOnAction {
+            RUNNING = !RUNNING
+            startBtn.text = if (RUNNING) "Pause" else "Resume"
+            multiThreadToggle.isDisable = RUNNING
+        }
+
+        topBar.children.addAll(startBtn, resetBtn, saveBtn, loadBtn, topBarSpacer, multiThreadToggle)
 
         val canvas = Canvas(CANVAS_X, CANVAS_Y)
         val graphicsContext = canvas.graphicsContext2D
@@ -193,7 +223,7 @@ class Main : Application() {
                 )
             )
         }
-        val copyBtn = Button("Copy").apply {
+        val copyBtn = Button("Copy Agent Dump").apply {
             setOnAction {
                 Clipboard.getSystemClipboard().setContent(
                     ClipboardContent()
@@ -307,8 +337,14 @@ class Main : Application() {
         val spawnLabel = Label().apply {
             textFill = Color.rgb(220, 225, 235)
         }
+        val systemInfoLabel = Label().apply {
+            textFill = Color.rgb(220, 225, 235)
+        }
 
-        bottomArea.children.addAll(populationLabel, killedLabel, spawnLabel)
+        val space = Region()
+        HBox.setHgrow(space, Priority.ALWAYS)
+
+        bottomArea.children.addAll(populationLabel, killedLabel, spawnLabel, space, systemInfoLabel)
 
         rightPanel.children.add(bottomArea)
 
@@ -329,14 +365,46 @@ class Main : Application() {
         }
 
         // -----------------------------------------------------
-
+        // Main simulation thread at 50hz
+        var tickCount = 0
+        var totalUpdateNs = 0L
+        var maxUpdateNs = 0L
+        var over12ms = 0
+        var over16ms = 0
+        var over20ms = 0
         simLoop.scheduleAtFixedRate({
             try {
-                if (RUNNING) simulation.update()
+                if (RUNNING) {
+                    val start = System.nanoTime()
+                    simulation.update()
+                    val elapsed = System.nanoTime() - start
+                    totalUpdateNs += elapsed
+                    if (elapsed > maxUpdateNs) maxUpdateNs = elapsed
+                    tickCount++
+                    if (elapsed > 12_000_000L) over12ms++
+                    if (elapsed > 16_000_000L) over16ms++
+                    if (elapsed > 20_000_000L) over20ms++
+                    if (tickCount >= 100) {
+                        AVG_SIM_TICK_TIME = (totalUpdateNs / tickCount / 1000).toInt()
+                        MAX_SIM_TICK_TIME = (maxUpdateNs / 1000).toInt()
+                        TICKS_OVER_12 = over12ms
+                        TICKS_OVER_16 = over16ms
+                        TICKS_OVER_20 = over20ms
+
+                        tickCount = 0
+                        totalUpdateNs = 0L
+                        maxUpdateNs = 0L
+                        over12ms = 0
+                        over16ms = 0
+                        over20ms = 0
+                    }
+                }
             } catch (t: Throwable) {
                 println(t.stackTraceToString())
             }
         }, 0, 20, TimeUnit.MILLISECONDS)
+
+        // Main sim thread running analysis 2.5 times per sec
         simLoop.scheduleAtFixedRate(analyze@{
             try {
                 if (RUNNING) {
@@ -357,6 +425,13 @@ class Main : Application() {
                         spawnLabel.text =
                             "Spawned Other Hue: ${spawnedWithOtherHue.get()}\n" +
                                     "Spawned Same Hue: ${spawnedWithOwnHue.get()}"
+                        systemInfoLabel.text =
+                            "--- Over 100 loops: --- \n" +
+                            "Avg. Loop Time: ${AVG_SIM_TICK_TIME / 1000f}ms \n" +
+                                    "Max Loop Time: ${MAX_SIM_TICK_TIME / 1000f}ms \n" +
+                                    "Loops over 12ms: $TICKS_OVER_12 \n" +
+                                    "Loops over 16ms: $TICKS_OVER_16 \n" +
+                                    "Loops over 20ms: $TICKS_OVER_20"
                     }
                 }
             } catch (t: Throwable) {
@@ -389,7 +464,9 @@ class Main : Application() {
     }
 
     override fun stop() {
+        RUNNING = false
         simLoop.shutdownNow()
+        simulation.shutDownThreads()
         Platform.exit()
         exitProcess(0)
     }

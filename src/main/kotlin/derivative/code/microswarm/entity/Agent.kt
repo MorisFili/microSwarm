@@ -36,6 +36,7 @@ open class Agent(
     val postState = FloatArray(network.networkInput)
     var facingX = 0f
     var facingY = 0f
+    var output = FloatArray(network.networkOutput)
 
     // Social features
     var PRESENCE_COUNT = 0
@@ -62,27 +63,29 @@ open class Agent(
     }
 
 
-    fun act() {
+    fun asyncGenerateIntent() {
         if (RENEGADE > 0) RENEGADE -= 0.005f
         if (refractoryPeriod > 0) refractoryPeriod--
-
         updateProximity()
-
         generateState(preState)
+        output = network.feedForward(preState)
+    }
 
-        val output = network.feedForward(preState)
-
+    fun syncPerformAction() {
         action(output[2], output[3], output[4])
         if (apathic) network.valence.coerceAtLeast(0f)
-        network.actionEvaluation()
-
-        move(output[0], output[1])
-
-        generateState(postState)
-
-        network.stateEvaluation(preState, postState)
-
     }
+    fun asyncActionEvaluation() {
+        network.actionEvaluation()
+    }
+    fun syncMovement() {
+        move(output[0], output[1])
+    }
+    fun asyncStateEvaluation() {
+        generateState(postState)
+        network.stateEvaluation(preState, postState)
+    }
+
 
     fun analysis(): String {
         return network.analysis(postState)

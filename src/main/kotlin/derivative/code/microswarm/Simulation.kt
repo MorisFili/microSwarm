@@ -9,6 +9,8 @@ import derivative.code.microswarm.network.Network
 import javafx.application.Platform
 import javafx.scene.paint.Color
 import java.util.*
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 
 class Simulation(
@@ -18,7 +20,6 @@ class Simulation(
     // Grid Settings
     companion object {
         val rng = Random()
-
         val MAX_ENTITY_COUNT = 5000
         val INITIAL_ENTITY_COUNT = 1000
 
@@ -54,6 +55,13 @@ class Simulation(
             } else null
         }
     }
+    var multiThreaded = true
+    val workerCount = 8 // Change to dynamic later
+    private val threads = Executors.newFixedThreadPool(workerCount)
+    private val chunkSize = (MAX_ENTITY_COUNT + workerCount - 1) / workerCount
+    private val futures = mutableListOf<Future<*>>()
+
+    fun shutDownThreads() { threads.shutdownNow() }
 
     var triggerCounter = 0
 
@@ -71,17 +79,103 @@ class Simulation(
         triggerCounter++
         gridUpdate()
 
-        for (entity in entities) {
-            if (entity == null) continue
-            if (!entity.enabled) continue
-            entity.act()
-            if (entity.MATE_CONDITION) {
-                if (entity.TARGET != null) {
-                    if (Main.populationCounter.get() <=  MAX_ENTITY_COUNT * 99 / 100) {
-                        reproduce(entity, entity.TARGET as Agent)
+        if (multiThreaded) {
+            // First async phase
+            var index = 0
+            futures.clear()
+            while (index < MAX_ENTITY_COUNT) {
+                val from = index
+                val to = minOf(from + chunkSize, MAX_ENTITY_COUNT)
+                futures += threads.submit {
+                    var i = from
+                    while (i < to) {
+                        val agent = entities[i]
+                        if (agent != null && agent.enabled) agent.asyncGenerateIntent()
+                        i++
                     }
                 }
-                entity.MATE_CONDITION = false
+                index = to
+            }
+
+            for (future in futures) future.get()
+
+            // Sync phase
+            for (entity in entities) {
+                if (entity == null) continue
+                if (!entity.enabled) continue
+                entity.syncPerformAction()
+                if (entity.MATE_CONDITION) {
+                    if (entity.TARGET != null) {
+                        if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
+                            reproduce(entity, entity.TARGET as Agent)
+                        }
+                    }
+                    entity.MATE_CONDITION = false
+                }
+            }
+
+            // Second async phase
+            index = 0
+            futures.clear()
+            while (index < MAX_ENTITY_COUNT) {
+                val from = index
+                val to = minOf(from + chunkSize, MAX_ENTITY_COUNT)
+                futures += threads.submit {
+                    var i = from
+                    while (i < to) {
+                        val agent = entities[i]
+                        if (agent != null && agent.enabled) agent.asyncActionEvaluation()
+                        i++
+                    }
+                }
+                index = to
+            }
+
+            for (future in futures) future.get()
+
+            // Second sync phase
+            for (entity in entities) {
+                if (entity == null) continue
+                if (!entity.enabled) continue
+                entity.syncMovement()
+            }
+
+            // Third async phase
+            index = 0
+            futures.clear()
+            while (index < MAX_ENTITY_COUNT) {
+                val from = index
+                val to = minOf(from + chunkSize, MAX_ENTITY_COUNT)
+                futures += threads.submit {
+                    var i = from
+                    while (i < to) {
+                        val agent = entities[i]
+                        if (agent != null && agent.enabled) agent.asyncStateEvaluation()
+                        i++
+                    }
+                }
+                index = to
+            }
+
+            for (future in futures) future.get()
+
+        } else {
+            for (entity in entities) {
+                if (entity == null) continue
+                if (!entity.enabled) continue
+                entity.asyncGenerateIntent()
+                entity.syncPerformAction()
+                if (entity.MATE_CONDITION) {
+                    if (entity.TARGET != null) {
+                        if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
+                            reproduce(entity, entity.TARGET as Agent)
+                        }
+                    }
+                    entity.MATE_CONDITION = false
+                }
+                entity.asyncActionEvaluation()
+                entity.syncMovement()
+                entity.asyncStateEvaluation()
             }
         }
 

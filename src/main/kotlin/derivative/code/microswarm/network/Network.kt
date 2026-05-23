@@ -492,16 +492,16 @@ class Network(
             }
         }
 
-        block.append("===== OutputIntentInput Neurons: =====\n")
-        for (i in 0 until outputNeurons) {
-            for (j in 0 until intentNeurons) {
-                for (k in 0 until inputNeurons) {
-                    block.append("OutputIntentInput [${i}][${j}][${k}]")
-                    block.append(" Fixed: ${outputIntentInputWeights[i][j][k]}")
-                    block.append("   Adapt: ${outputIntentInputMemory[i][j][k]}\n")
-                }
-            }
-        }
+//        block.append("===== OutputIntentInput Neurons: =====\n")
+//        for (i in 0 until outputNeurons) {
+//            for (j in 0 until intentNeurons) {
+//                for (k in 0 until inputNeurons) {
+//                    block.append("OutputIntentInput [${i}][${j}][${k}]")
+//                    block.append(" Fixed: ${outputIntentInputWeights[i][j][k]}")
+//                    block.append("   Adapt: ${outputIntentInputMemory[i][j][k]}\n")
+//                }
+//            }
+//        }
 
         block.append("===== Output Neurons: =====\n")
         for (i in 0 until outputNeurons) {
