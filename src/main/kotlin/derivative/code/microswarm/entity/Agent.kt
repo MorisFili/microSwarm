@@ -24,13 +24,15 @@ open class Agent(
 ) : Entity(id, x, y, hue, enabled) {
 
     // Field variables
-    val detectionRadius = 35f
+    val detectionRadius = 40f // Max radius = 50 in the current proximity scan logic
+    val targetRadius = detectionRadius / 2f
+    val actionRadius = targetRadius / 10f
     val PRESENCE_CAP = 50
-    val inProximity = arrayOfNulls<Agent>(PRESENCE_CAP)
-    val actionRadiusSq = 4f
+    val agentsInProximity = arrayOfNulls<Agent>(PRESENCE_CAP)
+    val entitiesInProximity = arrayOfNulls<Entity>(5)
     var withinActionRadius = false
-    val targetRadiusSq = 200f
     var TARGET: Entity? = null
+    var resourceField: Resource? = null
     var MATE_CONDITION = false
     val preState = FloatArray(network.networkInput)
     val postState = FloatArray(network.networkInput)
@@ -39,15 +41,16 @@ open class Agent(
     var output = FloatArray(network.networkOutput)
 
     // Social features
-    var PRESENCE_COUNT = 0
-    var CREDIT = 0
+    var AGENTS_PRESENCE_COUNT = 0
+    var ENTITIES_PRESENCE_COUNT = 0
+    var CREDIT = 0f
     var RENEGADE = 0f
 
     // Economy calculations
     val reproductionCost = 200
-    var refractoryPeriod = 200
-    val creditHorizonMultiplier = 15f // How many actions the state value can store
-    val creditDenominator = reproductionCost * creditHorizonMultiplier
+    var targetCooldown = 0
+    val creditHorizonMultiplier = 10f // How many actions the state should care about
+    var creditDenominator = reproductionCost * creditHorizonMultiplier
 
     // Genetic traits
     var sex = false
@@ -65,25 +68,32 @@ open class Agent(
 
     fun asyncGenerateIntent() {
         if (RENEGADE > 0) RENEGADE -= 0.005f
-        if (refractoryPeriod > 0) refractoryPeriod--
+        if (targetCooldown > 0) {
+            TARGET = null
+            targetCooldown--
+        }
         updateProximity()
         generateState(preState)
-        output = network.feedForward(preState)
+        network.feedForward(preState, output)
     }
 
     fun syncPerformAction() {
         action(output[2], output[3], output[4])
-        if (apathic) network.valence.coerceAtLeast(0f)
     }
+
     fun asyncActionEvaluation() {
+        generateMetaData()
         network.actionEvaluation()
     }
+
     fun syncMovement() {
         move(output[0], output[1])
     }
+
     fun asyncStateEvaluation() {
         generateState(postState)
         network.stateEvaluation(preState, postState)
+        network.weightAdjustment()
     }
 
 
@@ -116,6 +126,7 @@ open class Agent(
         var societalCredit = 0f
 
         // If target is out of target range remove
+        val targetRadiusSq = targetRadius * targetRadius
         if (TARGET != null) {
             val target = TARGET as Entity
             val dx = target.x - x
@@ -129,7 +140,7 @@ open class Agent(
         var closestDistSq = 1000f
         val moveLenSq = facingX * facingX + facingY * facingY
 
-        for (entity in inProximity) {
+        for (entity in agentsInProximity) {
             if (entity == null) continue
             if (!entity.enabled) continue
             val dx = entity.x - x
@@ -157,6 +168,7 @@ open class Agent(
 
             // Target assignment
             if (TARGET != null) continue
+            if (targetCooldown > 0) continue
             if (distSq > 0.00001f && moveLenSq > 0.000001f &&
                 distSq < targetRadiusSq && distSq < closestDistSq
             ) {
@@ -176,6 +188,7 @@ open class Agent(
             val dx = target.x - x
             val dy = target.y - y
             val targetDistSq = dx * dx + dy * dy
+            val actionRadiusSq = actionRadius * actionRadius
             if (targetDistSq > 0.000001f && targetDistSq <= actionRadiusSq) {
                 val moveLenSq = facingX * facingX + facingY * facingY
                 if (moveLenSq > 0.000001f) {
@@ -183,9 +196,34 @@ open class Agent(
                     if (forward > 0 && forward * forward > targetDistSq * moveLenSq * 0.25f) {
                         withinActionRadius = true
                     } else withinActionRadius = false
+                } else withinActionRadius = false
+            } else withinActionRadius = false
+        } else withinActionRadius = false
+
+        // Pick closest resource
+        var closestResource: Resource? = null
+        var closestDistSqResource = 1000f
+        for (entity in entitiesInProximity) {
+            if (entity is Resource) {
+                if (!entity.enabled) continue
+                val dx = entity.x - x
+                val dy = entity.y - y
+                val distSq = dx * dx + dy * dy
+
+                if (distSq < closestDistSqResource) {
+                    closestDistSqResource = distSq
+                    closestResource = entity
                 }
             }
         }
+
+        // Resource radius check
+        if (closestResource != null) {
+            if (closestDistSqResource < 100f) {
+                resourceField = closestResource
+            } else resourceField = null
+        } else resourceField = null
+
 
         //val avgSocietalCredit = if (sameCount + otherCount > 0) societalCredit / (sameCount + otherCount) else 0f
 
@@ -205,7 +243,7 @@ open class Agent(
 
             val dist = cheapDistance(avgDX, avgDY)
 
-            (1f - dist / detectionRadius)
+            (dist / detectionRadius)
         } else 0f
 
 
@@ -215,13 +253,13 @@ open class Agent(
         val otherHueCenterDY =
             if (otherCount > 0) (otherDY / otherCount) / detectionRadius else 0f
 
-        val otherHueDistance = if (otherCount > 0) {
+        val otherHueThreat = if (otherCount > 0) {
             val avgDX = otherDX / otherCount
             val avgDY = otherDY / otherCount
 
             val dist = cheapDistance(avgDX, avgDY)
 
-            (1f - dist / detectionRadius)
+            (1f - dist / detectionRadius) // Inverse distance
         } else 0f
 
         val sameHueGroupStrength = (sameCount / (PRESENCE_CAP / 3f))
@@ -231,25 +269,31 @@ open class Agent(
             if (renegadeCount > 0) (renegadeDX / renegadeCount) / detectionRadius else 0f
         val renegadeCenterDY =
             if (renegadeCount > 0) (renegadeDY / renegadeCount) / detectionRadius else 0f
-        val renegadeDistance = if (renegadeCount > 0) {
+        val renegadeThreat = if (renegadeCount > 0) {
             val avgDX = renegadeDX / renegadeCount
             val avgDY = renegadeDY / renegadeCount
 
             val dist = cheapDistance(avgDX, avgDY)
 
-            (1f - dist / detectionRadius)
+            (1f - dist / detectionRadius) // Inverse distance
         } else 0f
         val renegadeStrength = renegadeValue / (PRESENCE_CAP / 3f)
 
         val target = TARGET as Agent?
-        val targetDX = if (target != null) (target.x - x) / 14.14f else 0f
-        val targetDY = if (target != null) (target.y - y) / 14.14f else 0f
+        val targetDX = if (target != null) (target.x - x) / targetRadius else 0f
+        val targetDY = if (target != null) (target.y - y) / targetRadius else 0f
+        val targetDistance = if (target != null) cheapDistance(this, target) / targetRadius else 0f
 
         val totalCount = sameCount + otherCount
         val crowdingState = ((totalCount - (PRESENCE_CAP / 3f)) / (PRESENCE_CAP / 3f))
         val aloneState = -crowdingState
 
-        // Latest = 22
+        val resourceDX = if (closestResource != null) closestResource.x / detectionRadius else 0f
+        val resourceDY = if (closestResource != null) closestResource.y / detectionRadius else 0f
+        val resourceDistance = if (closestResource != null)
+            cheapDistance(this, closestResource) / detectionRadius else 0f
+
+        // Latest = 27
         state[0] = 1f // Bias/drive state, always on
 
         // Directional symmetry states (-1f, 1f)
@@ -265,12 +309,13 @@ open class Agent(
         // Unilateral states
         state[3] = sameHueDistance.coerceIn(0f, 1f) // Sensory, no eval
         state[4] = sameHueGroupStrength.coerceIn(0f, 1f)
-        state[7] = otherHueDistance.coerceIn(0f, 1f) // Sensory, no eval
+        state[7] = otherHueThreat.coerceIn(0f, 1f) // Sensory, no eval
         state[8] = otherHueGroupStrength.coerceIn(0f, 1f)
-        state[13] = renegadeDistance.coerceIn(0f, 1f) // Sensory, no eval
+        state[13] = renegadeThreat.coerceIn(0f, 1f) // Sensory, no eval
         state[14] = renegadeStrength.coerceIn(0f, 1f)
         state[18] = crowdingState.coerceIn(0f, 1f)
         state[19] = aloneState.coerceIn(0f, 1f)
+        state[23] = targetDistance.coerceIn(0f, 1f)
 
         // Self-sensory states
         state[10] = (CREDIT / creditDenominator).coerceIn(0f, 1f)
@@ -280,11 +325,25 @@ open class Agent(
         state[9] = if (target == null) 0f else if (target.hue == hue) 1f else -1f
         state[15] = if (target == null) 0f else if (target.sex != sex) 1f else -1f
         state[16] = if (target == null) 0f else if (target.RENEGADE > 0) 1f else 0f
+        state[24] = if (target == null) 0f else (target.CREDIT / creditDenominator).coerceIn(0f, 1f)
         state[22] = if (withinActionRadius) 1f else 0f
 
+        // Resource sensory
+        state[25] = resourceDX.coerceIn(-1f, 1f)
+        state[26] = resourceDY.coerceIn(-1f, 1f)
+        state[27] = resourceDistance.coerceIn(0f, 1f)
+
+        // Metadata
+        network.metaData[0] = CREDIT
     }
 
-    private fun cheapDistance(a: Agent, b: Agent): Float {
+    private fun generateMetaData() {
+        if (CREDIT > creditDenominator) creditDenominator = CREDIT
+        network.metaData[1] = CREDIT
+        network.metaData[2] = creditDenominator
+    }
+
+    private fun cheapDistance(a: Agent, b: Entity): Float {
         // Rough Euclidean approximation using magical numbers, ca 4.4% inaccuracy
         val dx = abs(a.x - b.x)
         val dy = abs(a.y - b.y)
@@ -307,60 +366,110 @@ open class Agent(
 
     private fun action(kill: Float, mate: Float, work: Float) {
 
-        if (maxOf(kill, mate, work) > network.ACTION_THRESHOLD) {
+        val choice = maxOf(kill, mate, work)
+        if (choice > network.ACTION_THRESHOLD) {
+            when (choice) {
+                work -> {
+                    if (resourceField != null) {
 
-            if (work >= mate && work >= kill) {
-                CREDIT += 1 * PRESENCE_COUNT
-                return
-            }
-
-            if (TARGET == null || !withinActionRadius) {
-                if (!network.intentWithoutAction) network.valence -= 0.1f
-                return
-            }
-            if (TARGET is Agent) {
-                val target = TARGET as Agent
-                if (mate >= kill) {
-                    if (sex != target.sex) {
-                        network.valence += 0.3f
-                        if (CREDIT >= reproductionCost &&
-                            refractoryPeriod == 0 &&
-                            !network.intentWithoutAction) {
-
-                            MATE_CONDITION = true
-                            CREDIT -= reproductionCost
-                            refractoryPeriod = 200
-                            network.valence += 1f
-                            TARGET = null
+                        if (network.explorationSignal) {
+                            network.valence += 1
+                            return
                         }
 
+                        val resource = resourceField ?: return
+                        val creditGained = (1f + (PRESENCE_CAP / 3f) -
+                                abs(AGENTS_PRESENCE_COUNT - (PRESENCE_CAP / 3f))).coerceAtLeast(1f)
+                        CREDIT += creditGained
+                        resource.value -= creditGained
+                        return
                     }
-                } else {
-                    network.valence -= 0.3f
-                    if (target.hue == hue) {
-                        if (!network.intentWithoutAction) {
-                            network.valence -= 0.5f
-                            RENEGADE += 10
-                            Main.killedOwnHue.incrementAndGet()
-                        }
-                    } else {
-                        if (!network.intentWithoutAction) {
-                            RENEGADE += 2f
-                            Main.killedOtherHue.incrementAndGet()
-                        }
-                    }
-                    if (target.RENEGADE > 0) network.valence += 1f
-                    if (!network.intentWithoutAction) {
-                        CREDIT += target.CREDIT
-                        target.CREDIT = 0
-                        target.enabled = false
-                        TARGET = null
-                        Main.populationCounter.decrementAndGet()
-                    }
+                }
 
+                else -> {
+
+                    if (TARGET == null) return
+                    val target = TARGET as Agent
+
+                    when (choice) {
+                        mate -> {
+
+                            if (network.explorationSignal) {
+                                if (withinActionRadius) {
+                                    if (sex != target.sex) {
+                                        network.valence += 0.5f
+                                        if (target.hue == hue) {
+                                            network.valence += 0.5f
+                                        }
+                                    } else network.valence -= 0.5f
+                                }
+                                return
+                            }
+
+                            Main.spawnAttempts.incrementAndGet()
+                            if (sex != target.sex) {
+                                if (CREDIT >= reproductionCost && withinActionRadius) {
+                                    MATE_CONDITION = true
+                                    CREDIT -= reproductionCost
+                                    targetCooldown = 200
+                                    if (hue == target.hue) {
+                                        network.valence += 1f
+                                        Main.spawnedWithOwnHue.incrementAndGet()
+                                    } else {
+                                        network.valence += 0.5f
+                                        Main.spawnedWithOtherHue.incrementAndGet()
+                                    }
+                                }
+                            }
+                            targetCooldown = 10
+                            return
+                        }
+
+                        kill -> {
+
+                            if (network.explorationSignal) {
+                                if (withinActionRadius) {
+                                    if (target.hue == hue) {
+                                        val creditGain = if (CREDIT > 0) (CREDIT + target.CREDIT) / CREDIT else 1f
+                                        network.valence += (1 - creditGain) / 0.5f // 50% gain = 1f
+                                        if (!apathic) network.valence -= 1f
+                                    } else {
+                                        val creditGain = if (CREDIT > 0) (CREDIT + target.CREDIT) / CREDIT else 1f
+                                        network.valence += (1 - creditGain) / 0.5f // 50% gain = 1f
+                                    }
+                                    if (target.RENEGADE > 0) network.valence += 1f
+                                }
+                                return
+                            }
+
+                            Main.killAttempts.incrementAndGet()
+                            if (withinActionRadius) {
+                                if (target.hue == hue) {
+                                    RENEGADE += 50
+                                    Main.killedOwnHue.incrementAndGet()
+                                    CREDIT += target.CREDIT
+                                    target.CREDIT = 0f
+                                    kill(target)
+                                    TARGET = null
+                                    targetCooldown = 50
+                                    Main.populationCounter.decrementAndGet()
+                                } else {
+                                    RENEGADE += 10f
+                                    Main.killedOtherHue.incrementAndGet()
+                                    CREDIT += target.CREDIT
+                                    target.CREDIT = 0f
+                                    kill(target)
+                                    TARGET = null
+                                    targetCooldown = 50
+                                    Main.populationCounter.decrementAndGet()
+                                }
+                                if (target.RENEGADE > 0) network.valence += 1f
+                            }
+                            targetCooldown = 10
+                        }
+                    }
                 }
             }
-
         }
     }
 
@@ -399,10 +508,18 @@ open class Agent(
 
     }
 
+    private fun kill(target: Agent) {
+        // Death related logic
+        target.enabled = false
+        Simulation.occupancyGrid[target.x.toInt()][target.y.toInt()] = false // clear occupancy
+    }
+
     private fun updateProximity() {
 
-        Arrays.fill(inProximity, null)
-        PRESENCE_COUNT = 0
+        Arrays.fill(agentsInProximity, null)
+        AGENTS_PRESENCE_COUNT = 0
+        ENTITIES_PRESENCE_COUNT = 0
+
 
         val gx = (x / Simulation.CELL_SIZE).toInt()
         val gy = (y / Simulation.CELL_SIZE).toInt()
@@ -422,10 +539,18 @@ open class Agent(
                     val distSq = dx * dx + dy * dy
 
                     if (distSq < detectionRadius * detectionRadius) { // suggestions: different radii for different purposes
-                        if (PRESENCE_COUNT < PRESENCE_CAP) {
-                            inProximity[PRESENCE_COUNT] = other as Agent
-                            PRESENCE_COUNT++
-                        } else break@scan
+                        if (AGENTS_PRESENCE_COUNT < PRESENCE_CAP) {
+                            if (other is Agent) {
+                                agentsInProximity[AGENTS_PRESENCE_COUNT] = other
+                                AGENTS_PRESENCE_COUNT++
+                            }
+                        }
+                        if (ENTITIES_PRESENCE_COUNT < 5) {
+                            if (other is Resource) {
+                                entitiesInProximity[ENTITIES_PRESENCE_COUNT] = other
+                                ENTITIES_PRESENCE_COUNT++
+                            }
+                        }
                     }
                 }
             }

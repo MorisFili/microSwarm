@@ -1,6 +1,7 @@
 package derivative.code.microswarm
 
-import derivative.code.microswarm.Simulation.Companion.entities
+import derivative.code.microswarm.Simulation.Companion.agents
+import derivative.code.microswarm.Simulation.Companion.resources
 import javafx.animation.AnimationTimer
 import javafx.application.Application
 import javafx.application.Platform
@@ -75,13 +76,17 @@ class Main : Application() {
         var RENEGADE_POP = 0
 
         @Volatile
-        var LR_AMP = 0f
+        var VAL_MULTIPL = 1f
+        @Volatile
+        var LR_MULTIPL = 1f
 
         val populationCounter = AtomicInteger(0)
         val killedOwnHue = AtomicInteger(0)
         val killedOtherHue = AtomicInteger(0)
         val spawnedWithOwnHue = AtomicInteger(0)
         val spawnedWithOtherHue = AtomicInteger(0)
+        val spawnAttempts = AtomicInteger(0)
+        val killAttempts = AtomicInteger(0)
 
     }
 
@@ -263,12 +268,12 @@ class Main : Application() {
         }
 
         val learningAmplifierSlider = Slider().apply {
-            min = 0.0
+            min = 1.0
             max = 10.0
-            value = 0.0
+            value = 1.0
 
             valueProperty().addListener { _, _, newVal ->
-                LR_AMP = newVal.toFloat()
+                VAL_MULTIPL = newVal.toFloat()
             }
         }
         val learningAmplifierLabel = Label().apply {
@@ -276,21 +281,43 @@ class Main : Application() {
             textProperty().bind(
                 Bindings.createStringBinding(
                     {
-                        val multiplier = LR_AMP
-                        val result = 0.08f + 0.08f * multiplier
-
-                        "Learning Rate: %.6f".format(result)
+                        "Valence Multiplier: %.3f".format(VAL_MULTIPL)
                     },
                     learningAmplifierSlider.valueProperty()
                 )
             )
         }
-        val sliderBox = VBox(learningAmplifierLabel, learningAmplifierSlider).apply {
+        val valenceAmpBox = VBox(learningAmplifierLabel, learningAmplifierSlider).apply {
             spacing = 6.0
             padding = Insets(12.0)
         }
 
-        instrumentPanel.children.add(sliderBox)
+        val learningRateSlider = Slider().apply {
+            min = 1.0
+            max = 10.0
+            value = 1.0
+
+            valueProperty().addListener { _, _, newVal ->
+                LR_MULTIPL = newVal.toFloat()
+            }
+        }
+        val learningRateLabel = Label().apply {
+            textFill = Color.rgb(220, 225, 235)
+            textProperty().bind(
+                Bindings.createStringBinding(
+                    {
+                        "Learning rate: %.3f".format(LR_MULTIPL)
+                    },
+                    learningRateSlider.valueProperty()
+                )
+            )
+        }
+        val learningRateBox = VBox(learningRateLabel, learningRateSlider).apply {
+            spacing = 6.0
+            padding = Insets(12.0)
+        }
+
+        instrumentPanel.children.addAll(valenceAmpBox, learningRateBox)
 
         HBox.setHgrow(scrollableWrapper, Priority.ALWAYS)
         HBox.setHgrow(instrumentPanel, Priority.ALWAYS)
@@ -408,7 +435,7 @@ class Main : Application() {
         simLoop.scheduleAtFixedRate(analyze@{
             try {
                 if (RUNNING) {
-                    val text = entities.firstOrNull { it?.id == SELECTED_AGENT_ID }
+                    val text = agents.firstOrNull { it?.id == SELECTED_AGENT_ID }
                         ?.analysis()
                         ?: return@analyze
                     Platform.runLater {
@@ -421,10 +448,12 @@ class Main : Application() {
                                     "Global Avg. Credit: $GLOBAL_AVG_CREDIT"
                         killedLabel.text =
                             "Killed Other Hue: ${killedOtherHue.get()}\n" +
-                                    "Killed Same Hue: ${killedOwnHue.get()}"
+                                    "Killed Same Hue: ${killedOwnHue.get()}\n" +
+                                    "Kill Attempts: ${killAttempts.get()}"
                         spawnLabel.text =
                             "Spawned Other Hue: ${spawnedWithOtherHue.get()}\n" +
-                                    "Spawned Same Hue: ${spawnedWithOwnHue.get()}"
+                                    "Spawned Same Hue: ${spawnedWithOwnHue.get()}\n" +
+                                    "Spawn Attempts: ${spawnAttempts.get()}"
                         systemInfoLabel.text =
                             "--- Over 100 loops: --- \n" +
                             "Avg. Loop Time: ${AVG_SIM_TICK_TIME / 1000f}ms \n" +
@@ -439,21 +468,27 @@ class Main : Application() {
             }
         }, 0, 400, TimeUnit.MILLISECONDS)
 
-        object : AnimationTimer() {
-            override fun handle(now: Long) {
-                if (RUNNING) {
-                    graphicsContext.fill = Color.BLACK
-                    graphicsContext.fillRect(0.0, 0.0, canvas.width, canvas.height)
+            object : AnimationTimer() {
+                override fun handle(now: Long) {
+                    if (RUNNING) {
+                        graphicsContext.fill = Color.BLACK
+                        graphicsContext.fillRect(0.0, 0.0, canvas.width, canvas.height)
 
-                    for (entity in entities) {
-                        if (entity == null) continue
-                        if (!entity.enabled) continue
-                        graphicsContext.fill = entity.hue ?: Color.WHITE
-                        graphicsContext.fillRect(entity.x.toDouble(), entity.y.toDouble(), 1.0, 1.0)
+                        for (resource in resources) {
+                            if (!resource.enabled) continue
+                            graphicsContext.fill = resource.hue ?: Color.WHITE
+                            graphicsContext.fillRect(resource.x.toDouble(), resource.y.toDouble(), 2.0, 2.0)
+                        }
+
+                        for (entity in agents) {
+                            if (entity == null) continue
+                            if (!entity.enabled) continue
+                            graphicsContext.fill = entity.hue ?: Color.WHITE
+                            graphicsContext.fillRect(entity.x.toDouble(), entity.y.toDouble(), 1.0, 1.0)
+                        }
                     }
                 }
-            }
-        }.start()
+            }.start()
 
         stage.scene = scene
         stage.width = Screen.getPrimary().visualBounds.width

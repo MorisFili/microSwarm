@@ -5,6 +5,7 @@ import derivative.code.microswarm.Main.Companion.CANVAS_X
 import derivative.code.microswarm.Main.Companion.CANVAS_Y
 import derivative.code.microswarm.entity.Agent
 import derivative.code.microswarm.entity.Entity
+import derivative.code.microswarm.entity.Resource
 import derivative.code.microswarm.network.Network
 import javafx.application.Platform
 import javafx.scene.paint.Color
@@ -23,18 +24,18 @@ class Simulation(
         val MAX_ENTITY_COUNT = 5000
         val INITIAL_ENTITY_COUNT = 1000
 
-        val palette = arrayOf(
-            Color.RED,
-            Color.ORANGE,
-            Color.YELLOW,
+        val palette = arrayOf( // Reserver: green = resource fields, red
             Color.MAGENTA,
-            Color.CYAN
+            Color.WHITE,
+            Color.HOTPINK,
+            Color.ORANGE,
+            Color.SKYBLUE
         )
         const val CELL_SIZE = 50
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 23
+        const val NET_IN = 28
         const val NET_OUT = 5
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
@@ -44,7 +45,7 @@ class Simulation(
         }
         val occupancyGrid = Array(CANVAS_X.toInt()) { BooleanArray(CANVAS_Y.toInt()) }
         var nextAgentIndex = 0
-        val entities = Array(MAX_ENTITY_COUNT) { i ->
+        val agents = Array(MAX_ENTITY_COUNT) { i ->
             if (i < INITIAL_ENTITY_COUNT) {
                 val x = rng.nextFloat(0f, CANVAS_X.toFloat())
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
@@ -53,6 +54,11 @@ class Simulation(
                 nextAgentIndex++
                 Agent(x, y, i, hue, network = nn)
             } else null
+        }
+        val resources = Array(50) { i ->
+            val x = rng.nextFloat(i * 20f, (i + 1) * 20f)
+            val y = rng.nextFloat(1000f)
+            Resource(i, x, y)
         }
     }
     var multiThreaded = true
@@ -66,13 +72,18 @@ class Simulation(
     var triggerCounter = 0
 
     init {
+
+        for (resource in resources) {
+            occupancyGrid[resource.x.toInt()][resource.y.toInt()] = true
+        }
+
         // Fill occupancy grid with spawn coordinates
-        for (entity in entities) {
+        for (entity in agents) {
             if (entity == null) continue
             occupancyGrid[entity.x.toInt()][entity.y.toInt()] = true
         }
         Main.populationCounter.set(INITIAL_ENTITY_COUNT)
-        Platform.runLater { application.selector.items.addAll(entities.indices) }
+        Platform.runLater { application.selector.items.addAll(agents.indices) }
     }
 
     fun update() {
@@ -89,7 +100,7 @@ class Simulation(
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        val agent = entities[i]
+                        val agent = agents[i]
                         if (agent != null && agent.enabled) agent.asyncGenerateIntent()
                         i++
                     }
@@ -100,7 +111,7 @@ class Simulation(
             for (future in futures) future.get()
 
             // Sync phase
-            for (entity in entities) {
+            for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
                 entity.syncPerformAction()
@@ -111,6 +122,7 @@ class Simulation(
                         }
                     }
                     entity.MATE_CONDITION = false
+                    entity.TARGET = null
                 }
             }
 
@@ -123,7 +135,7 @@ class Simulation(
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        val agent = entities[i]
+                        val agent = agents[i]
                         if (agent != null && agent.enabled) agent.asyncActionEvaluation()
                         i++
                     }
@@ -134,7 +146,7 @@ class Simulation(
             for (future in futures) future.get()
 
             // Second sync phase
-            for (entity in entities) {
+            for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
                 entity.syncMovement()
@@ -149,7 +161,7 @@ class Simulation(
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        val agent = entities[i]
+                        val agent = agents[i]
                         if (agent != null && agent.enabled) agent.asyncStateEvaluation()
                         i++
                     }
@@ -160,7 +172,7 @@ class Simulation(
             for (future in futures) future.get()
 
         } else {
-            for (entity in entities) {
+            for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
                 entity.asyncGenerateIntent()
@@ -172,6 +184,7 @@ class Simulation(
                         }
                     }
                     entity.MATE_CONDITION = false
+                    entity.TARGET = null
                 }
                 entity.asyncActionEvaluation()
                 entity.syncMovement()
@@ -179,12 +192,24 @@ class Simulation(
             }
         }
 
+        for (resource in resources) {
+            if (resource.value <= 0) {
+                val coordinates = getNearestUnoccupiedCoordinate(
+                    rng.nextFloat(1000f),
+                    rng.nextFloat(1000f)
+                )
+                resource.x = coordinates[0].toFloat()
+                resource.y = coordinates[1].toFloat()
+                resource.value = 1000f
+            }
+        }
+
         if (triggerCounter >= 25) {
-            var totalCred = 0
+            var totalCred = 0f
             var totalMale = 0
             var totalApathic = 0
             var totalRene = 0
-            for (entity in entities) {
+            for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
                 if (entity.sex) totalMale++
@@ -192,7 +217,7 @@ class Simulation(
                 if (entity.RENEGADE > 0) totalRene++
                 totalCred += entity.CREDIT
             }
-            Main.GLOBAL_AVG_CREDIT = totalCred / Main.populationCounter.get() // Populated in init
+            Main.GLOBAL_AVG_CREDIT = totalCred.toInt() / Main.populationCounter.get() // Populated in init
             Main.MALE_POP = totalMale
             Main.APATHIC_POP = totalApathic
             Main.RENEGADE_POP = totalRene
@@ -223,6 +248,15 @@ class Simulation(
             }
         }
 
+        val intentInput = a1weights.transferIntentInput
+        val intentInput2 = a2weights.transferIntentInput
+        for (i in 0 until intentInput.size) {
+            for (j in 0 until intentInput[i].size) {
+                if (rng.nextFloat() < 0.5f) continue
+                intentInput[i][j] = intentInput2[i][j]
+            }
+        }
+
         val outputIntent = a1weights.transferOutputIntent
         val outputIntent2 = a2weights.transferOutputIntent
         for (i in 0 until outputIntent.size) {
@@ -232,31 +266,19 @@ class Simulation(
             }
         }
 
-        val outputIntentInput = a1weights.transferOutputIntentInput
-        val outputIntentInput2 = a2weights.transferOutputIntentInput
-        for (i in 0 until outputIntentInput.size) {
-            for (j in 0 until outputIntentInput[i].size) {
-                for (k in 0 until outputIntentInput[i][j].size) {
-                    if (rng.nextFloat() < 0.5f) continue
-                    outputIntentInput[i][j][k] = outputIntentInput2[i][j][k]
-                }
-            }
-        }
-
         val spawnCoordinates = getNearestUnoccupiedCoordinate(a1.x, a1.y)
         val x = spawnCoordinates[0].toFloat()
         val y = spawnCoordinates[1].toFloat()
         val hue = (if (rng.nextFloat() < 0.5f) a1.hue else a2.hue) ?: Color.WHITE
         val weights = Network.WeightsPackage(
-            input, intent,
-            outputIntent, outputIntentInput
+            input, intent, intentInput, outputIntent
         )
         val nn = Network(NET_IN, NET_OUT)
 
-        val nextAgent = entities.first { it == null || !it.enabled }
+        val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {
-            entities[nextAgentIndex] = Agent(x, y, nextAgentIndex, hue, true, nn)
-            entities[nextAgentIndex]?.importWeights(weights)
+            agents[nextAgentIndex] = Agent(x, y, nextAgentIndex, hue, true, nn)
+            agents[nextAgentIndex]?.importWeights(weights)
             nextAgentIndex++
         } else {
             nextAgent.x = x
@@ -264,12 +286,11 @@ class Simulation(
             nextAgent.hue = hue
             nextAgent.importWeights(weights)
             nextAgent.enabled = true
-            nextAgent.CREDIT = 0
+            nextAgent.CREDIT = 0f
             nextAgent.sex = rng.nextFloat() < 0.5f
             nextAgent.apathic = a1.apathic || a2.apathic // dominant trait test
         }
         Main.populationCounter.incrementAndGet()
-        if (a1.hue == a2.hue) Main.spawnedWithOwnHue.incrementAndGet() else Main.spawnedWithOtherHue.incrementAndGet()
     }
 
     private fun getNearestUnoccupiedCoordinate(x: Float, y: Float): IntArray {
@@ -296,8 +317,20 @@ class Simulation(
         // Clear old stats
         for (gx in 0 until CELLS_PER_ROW) Arrays.fill(gridCellCount[gx], 0)
 
-        for (entity in entities) {
+        for (entity in agents) {
             if (entity == null) continue
+            if (!entity.enabled) continue
+            val gx = (entity.x / CELL_SIZE).toInt()
+            val gy = (entity.y / CELL_SIZE).toInt()
+
+            val gcCount = gridCellCount[gx][gy]
+            if (gcCount < MAX_PER_CELL) {
+                entityGrid[gx][gy][gcCount] = entity
+                gridCellCount[gx][gy]++
+            }
+        }
+
+        for (entity in resources) {
             if (!entity.enabled) continue
             val gx = (entity.x / CELL_SIZE).toInt()
             val gy = (entity.y / CELL_SIZE).toInt()
