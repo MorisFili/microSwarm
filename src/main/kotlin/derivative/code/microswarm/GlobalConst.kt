@@ -1,4 +1,18 @@
 package derivative.code.microswarm
+
+import javafx.scene.paint.Color
+
+fun managePopHueCounter(hue: Color?, increment: Boolean = true) {
+    if (hue == null) return
+    when (hue) {
+        Color.MAGENTA -> if (increment) Main.magentaAgents.incrementAndGet() else Main.magentaAgents.decrementAndGet()
+        Color.WHITE -> if (increment) Main.whiteAgents.incrementAndGet() else Main.whiteAgents.decrementAndGet()
+        Color.HOTPINK -> if (increment) Main.pinkAgents.incrementAndGet() else Main.pinkAgents.decrementAndGet()
+        Color.ORANGE -> if (increment) Main.orangeAgents.incrementAndGet() else Main.orangeAgents.decrementAndGet()
+        Color.SKYBLUE -> if (increment) Main.blueAgents.incrementAndGet() else Main.blueAgents.decrementAndGet()
+    }
+}
+
 val discountLookup = floatArrayOf(
     1.000000f, // 0 steps
     0.950000f,

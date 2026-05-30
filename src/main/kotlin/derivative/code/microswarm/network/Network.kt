@@ -17,7 +17,7 @@ class Network(
     // Fixed Variables
     private val inputNeurons = networkInput
     private val activityNeurons = networkInput
-    private val intentNeurons = networkInput / 2
+    private val intentNeurons = (networkInput / 2) + 1
     private val outputNeurons = networkOutput * 2
     private val learningRate = 0.08f
     private val weightDecay = 0.99985f // For the deepest layer
@@ -25,7 +25,10 @@ class Network(
 
     //private val activationThreshold = 0.13f
     val ACTION_THRESHOLD = 0.5f
-
+    val THREAT_KILL_INTENT_INDEX = intentNeurons - 1// Last index
+    val KILL_ACTION_INDEX = 4
+    val THREAT_INPUT_INDEX = 28
+    val ACTIONRADIUS_INDEX = 22
     // Util
     private val rng = Random()
 
@@ -83,6 +86,7 @@ class Network(
         for (i in 4..9) { // Output indices that are action based
             outputIsAction[i] = true
         }
+        seedAllReflexes()
     }
 
 
@@ -120,6 +124,10 @@ class Network(
             var sumInt = 0f
             for (j in 0 until intentNeurons) {
                 val weightsOI = outputIntentWeights[i][j] + outputIntentMemory[i][j]
+                if (i == KILL_ACTION_INDEX && j == THREAT_KILL_INTENT_INDEX) { // Fight reflex
+                    sumOI += outputIntentWeights[i][j] * interactionIntent[j] * input[ACTIONRADIUS_INDEX] //
+                    continue
+                }
                 sumOI += weightsOI * intent[j]
                 sumInt += weightsOI * interactionIntent[j]
             }
@@ -184,10 +192,14 @@ class Network(
             }
         }
 
-        // Random exploration when standing still
-        val moveX = output[0] - output[1]
-        val moveY = output[2] - output[3]
+        // Per-axis stress injection
+        val flightValue = (-inputArray[28]).coerceIn(0f, 1f)
+        val flightX = sign(output[0] - output[1]) * if (flightValue > 0.3f) flightValue else 0f
+        val flightY = sign(output[2] - output[3]) * if (flightValue > 0.3f) flightValue else 0f
+        val moveX = output[0] - output[1] + flightX
+        val moveY = output[2] - output[3] + flightY
 
+        // Random exploration when standing still
         if (abs(moveX) < 0.001f && abs(moveY) < 0.001f && rng.nextFloat() < 0.2f) {
             output[0] = rng.nextFloat(1f)
             output[1] = rng.nextFloat(1f)
@@ -217,47 +229,47 @@ class Network(
 
         val detectionRadius = 40f
         val targetRadius = detectionRadius / 2f
+        val isRenegade = metaData[3] == 1f
+        //val numbingCoefficient = 1f // In high acute states others matter less
 
         // sameHue attraction DX + DY * hueStrength
         valence += evaluateSmallerBetter(
             preState[1], postState[1],
-            detectionRadius, postState[4]
+            detectionRadius, postState[4], isRenegade
         )
         valence += evaluateSmallerBetter(
             preState[2], postState[2],
-            detectionRadius, postState[4]
+            detectionRadius, postState[4], isRenegade
         )
 
         // otherHue avoidance DX + DY * hueStrength
         valence += evaluateSmallerBetter(
             preState[5], postState[5],
-            detectionRadius, postState[8], negative = true
+            detectionRadius, postState[8], inverse = true
         )
         valence += evaluateSmallerBetter(
             preState[6], postState[6],
-            detectionRadius, postState[8], negative = true
+            detectionRadius, postState[8], inverse = true
         )
 
         // Renegade avoidance DX + DY * renegadeStrength
         valence += evaluateSmallerBetter(
             preState[11], postState[11],
-            detectionRadius, postState[14], negative = true
+            detectionRadius, postState[14], !isRenegade
         )
         valence += evaluateSmallerBetter(
             preState[12], postState[12],
-            detectionRadius, postState[14], negative = true
+            detectionRadius, postState[14], !isRenegade
         )
 
         // Crowding
-        valence += evaluateSmallerBetter(
-            preState[18], postState[18], // Possibly too weak
-            1f
-        ).coerceIn(0f, 1f)
-        // Alone
-        valence += evaluateSmallerBetter(
-            preState[19], postState[19], // Possibly too weak
-            1f
-        ).coerceIn(0f, 1f)
+        valence += evaluateSmallerBetter(preState[18], postState[18], 1f
+        )
+
+        // Danger States
+        valence += evaluateSmallerBetter(preState[19], postState[19], 1f
+        )
+        valence += evaluateSmallerBetter(preState[28], postState[28], 1f)
 
         // Target chasing distanceDelta * 1-distance (distance remaining scalar)
         valence += evaluateSmallerBetter(
@@ -266,7 +278,8 @@ class Network(
         )
 
         // Resource center distance
-        valence += evaluateSmallerBetter(preState[27], postState[27], detectionRadius)
+        valence += evaluateSmallerBetter(preState[27], postState[27],
+            detectionRadius)
 
         valence /= max(1, contributingStatesCounter)
 
@@ -283,7 +296,7 @@ class Network(
         postState: Float,
         maxRadius: Float,
         scalar: Float = 1f,
-        negative: Boolean = false
+        inverse: Boolean = false
     ): Float {
         if (preState == 0f || postState == 0f) return 0f // skip inactive
         val delta = abs(preState) - abs(postState)
@@ -295,7 +308,7 @@ class Network(
 
         val valenceOut = (abs(reward) + (discountBonus * 0.5f)) *
                 sign(reward) * scalar *
-                if (negative) -1f else 1f // sign flip for negative
+                if (inverse) -1f else 1f // sign flip for negative
 
         if (abs(valenceOut) > 0.1f) contributingStatesCounter++ // Significant enough contribution
 
@@ -445,6 +458,20 @@ class Network(
 
     // ===================== HELPER FUNCTIONS ===================== \\
 
+    private fun seedIntentReflexes(
+        intentNeuronIndex: Int, inputReflexIndex: Int,
+        value: Float, positive: Boolean = true) {
+        val reflexValue = if (positive) value else -value
+        intentInputWeights[intentNeuronIndex][inputReflexIndex] = reflexValue
+    }
+
+    private fun seedOutputReflexes(
+        outputNeuronIndex: Int, intentReflexIndex: Int,
+        value: Float, positive: Boolean = true) {
+        val reflexValue = if (positive) value else -value
+        outputIntentWeights[outputNeuronIndex][intentReflexIndex] = reflexValue
+    }
+
     private fun adaptiveWeightDecay(memoryValue: Float, decay: Float, maxDecay: Float): Float {
         val memory = (abs(memoryValue) / maxMemory).coerceIn(0f, 1f)
         val pressure = (memory * memory).coerceIn(0f, 1f)
@@ -546,8 +573,15 @@ class Network(
             }
         }
         resetMutables()
+        seedAllReflexes()
     }
 
+    private fun seedAllReflexes() {
+        seedIntentReflexes(THREAT_KILL_INTENT_INDEX,
+            THREAT_INPUT_INDEX, 1f)
+        seedOutputReflexes(KILL_ACTION_INDEX,
+            THREAT_KILL_INTENT_INDEX, 1f)
+    }
     private fun resetMutables() {
         // Plastic weights
         for (i in 0 until memoryIn.size) {
@@ -590,18 +624,6 @@ class Network(
             }
         }
     }
-
-    private fun matrixBiasSeeder3d(matrix: Array<Array<FloatArray>>) {
-        for (i in 0 until matrix.size) {
-            for (j in 0 until matrix[i].size) {
-                for (k in 0 until matrix[i][j].size) {
-                    matrix[i][j][k] = rng.nextGaussian(0.0, 0.1)
-                        .toFloat().coerceIn(-0.2f, 0.2f)
-                }
-            }
-        }
-    }
-
 
     fun analysis(inputs: FloatArray): String {
         val block = StringBuilder(5000)

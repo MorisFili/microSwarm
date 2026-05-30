@@ -48,6 +48,7 @@ class Main : Application() {
         var CANVAS_X = 1000.0
         var CANVAS_Y = 1000.0
 
+        // Panel statistics counters
         @Volatile
         var AVG_SIM_TICK_TIME = 0
 
@@ -87,7 +88,11 @@ class Main : Application() {
         val spawnedWithOtherHue = AtomicInteger(0)
         val spawnAttempts = AtomicInteger(0)
         val killAttempts = AtomicInteger(0)
-
+        val magentaAgents = AtomicInteger(0)
+        val whiteAgents = AtomicInteger(0)
+        val pinkAgents = AtomicInteger(0)
+        val orangeAgents = AtomicInteger(0)
+        val blueAgents = AtomicInteger(0)
     }
 
     // Class properties
@@ -358,6 +363,9 @@ class Main : Application() {
         val populationLabel = Label().apply {
             textFill = Color.rgb(220, 225, 235)
         }
+        val agentColorLabel = Label().apply {
+            textFill = Color.rgb(220, 225, 235)
+        }
         val killedLabel = Label().apply {
             textFill = Color.rgb(220, 225, 235)
         }
@@ -371,7 +379,8 @@ class Main : Application() {
         val space = Region()
         HBox.setHgrow(space, Priority.ALWAYS)
 
-        bottomArea.children.addAll(populationLabel, killedLabel, spawnLabel, space, systemInfoLabel)
+        bottomArea.children.addAll(populationLabel, agentColorLabel,
+            killedLabel, spawnLabel, space, systemInfoLabel)
 
         rightPanel.children.add(bottomArea)
 
@@ -440,12 +449,25 @@ class Main : Application() {
                         ?: return@analyze
                     Platform.runLater {
                         outputText.text = text
+                        val popCounter = populationCounter.get()
                         populationLabel.text =
-                            "Population: ${populationCounter.get()}\n" +
+                            "Population: ${popCounter}\n" +
                                     "Male pop: $MALE_POP \n" +
                                     "Apathic pop: $APATHIC_POP \n" +
                                     "Renegade pop: $RENEGADE_POP \n" +
                                     "Global Avg. Credit: $GLOBAL_AVG_CREDIT"
+                        agentColorLabel.text =
+                            "Population Hues\n" +
+                                    "Magenta: %.2f%%\n".format(magentaAgents.get().toDouble() /
+                                            popCounter * 100.0) +
+                                    "White: %.2f%%\n".format(whiteAgents.get().toDouble() /
+                                            popCounter * 100.0) +
+                                    "Pink: %.2f%%\n".format(pinkAgents.get().toDouble() /
+                                            popCounter * 100.0) +
+                                    "Orange: %.2f%%\n".format(orangeAgents.get().toDouble() /
+                                            popCounter * 100.0) +
+                                    "Blue: %.2f%%\n".format(blueAgents.get().toDouble() /
+                                            popCounter * 100.0)
                         killedLabel.text =
                             "Killed Other Hue: ${killedOtherHue.get()}\n" +
                                     "Killed Same Hue: ${killedOwnHue.get()}\n" +

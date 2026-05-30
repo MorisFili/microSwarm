@@ -2,6 +2,7 @@ package derivative.code.microswarm.entity
 
 import derivative.code.microswarm.Main
 import derivative.code.microswarm.Simulation
+import derivative.code.microswarm.managePopHueCounter
 import derivative.code.microswarm.network.Network
 import javafx.scene.paint.Color
 import java.util.Arrays
@@ -19,19 +20,21 @@ open class Agent(
     // Attributes
     id: Int,
     hue: Color,
-    enabled: Boolean = true,
+    isEnabled: Boolean = true,
     private val network: Network
-) : Entity(id, x, y, hue, enabled) {
+) : Entity(id, x, y, hue, isEnabled) {
 
     // Field variables
     val detectionRadius = 40f // Max radius = 50 in the current proximity scan logic
     val targetRadius = detectionRadius / 2f
     val actionRadius = targetRadius / 10f
     val PRESENCE_CAP = 50
+    val GROUP_SIZE = PRESENCE_CAP / 3f
     val agentsInProximity = arrayOfNulls<Agent>(PRESENCE_CAP)
     val entitiesInProximity = arrayOfNulls<Entity>(5)
     var withinActionRadius = false
-    var TARGET: Entity? = null
+    var TARGET: Agent? = null
+    val targetedBy = arrayOfNulls<Agent>(5)
     var resourceField: Resource? = null
     var MATE_CONDITION = false
     val preState = FloatArray(network.networkInput)
@@ -44,7 +47,8 @@ open class Agent(
     var AGENTS_PRESENCE_COUNT = 0
     var ENTITIES_PRESENCE_COUNT = 0
     var CREDIT = 0f
-    var RENEGADE = 0f
+    var isRenegade = false
+    var KILL_COUNT = 0f
 
     // Economy calculations
     val reproductionCost = 200
@@ -66,14 +70,15 @@ open class Agent(
     }
 
 
-    fun asyncGenerateIntent() {
-        if (RENEGADE > 0) RENEGADE -= 0.005f
+    fun syncGenerateIntent() {
         if (targetCooldown > 0) {
-            TARGET = null
             targetCooldown--
         }
         updateProximity()
         generateState(preState)
+    }
+
+    fun asyncFeedForward() {
         network.feedForward(preState, output)
     }
 
@@ -118,25 +123,26 @@ open class Agent(
         var otherDX = 0f
         var otherDY = 0f
 
-        var renegadeCount = 0f
-        var renegadeValue = 0f
+        var renegadeGroupCount = 0f
+        var renegadeStrength = 0f
         var renegadeDX = 0f
         var renegadeDY = 0f
 
-        var societalCredit = 0f
-
-        // If target is out of target range remove
+        // Target clearing logic
         val targetRadiusSq = targetRadius * targetRadius
-        if (TARGET != null) {
-            val target = TARGET as Entity
+        if (targetCooldown > 0) clearTarget()
+
+        var target = TARGET
+
+        if (target != null && !target.enabled) clearTarget()
+        if (target != null) {
             val dx = target.x - x
             val dy = target.y - y
             val targetDistSq = dx * dx + dy * dy
-            if (targetDistSq > targetRadiusSq) TARGET = null // target lost
-            if (!target.enabled) TARGET = null
+            if (targetDistSq > targetRadiusSq) clearTarget()
         }
 
-        var closestTarget: Entity? = null
+        var closestTarget: Agent? = null
         var closestDistSq = 1000f
         val moveLenSq = facingX * facingX + facingY * facingY
 
@@ -157,18 +163,15 @@ open class Agent(
                 otherDY += dy
             }
 
-            if (entity.RENEGADE > 0) {
-                renegadeCount++
+            if (entity.isRenegade) {
+                renegadeGroupCount++
                 renegadeDX += dx
                 renegadeDY += dy
-                renegadeValue += entity.RENEGADE
+                renegadeStrength += entity.KILL_COUNT
             }
 
-            societalCredit += entity.CREDIT
-
             // Target assignment
-            if (TARGET != null) continue
-            if (targetCooldown > 0) continue
+            if (TARGET != null) continue // Target already assigned
             if (distSq > 0.00001f && moveLenSq > 0.000001f &&
                 distSq < targetRadiusSq && distSq < closestDistSq
             ) {
@@ -180,25 +183,10 @@ open class Agent(
             }
         }
 
-        if (TARGET == null) TARGET = closestTarget
-
-        // Action radius check
-        if (TARGET != null) {
-            val target = TARGET as Entity
-            val dx = target.x - x
-            val dy = target.y - y
-            val targetDistSq = dx * dx + dy * dy
-            val actionRadiusSq = actionRadius * actionRadius
-            if (targetDistSq > 0.000001f && targetDistSq <= actionRadiusSq) {
-                val moveLenSq = facingX * facingX + facingY * facingY
-                if (moveLenSq > 0.000001f) {
-                    val forward = facingX * dx + facingY * dy
-                    if (forward > 0 && forward * forward > targetDistSq * moveLenSq * 0.25f) {
-                        withinActionRadius = true
-                    } else withinActionRadius = false
-                } else withinActionRadius = false
-            } else withinActionRadius = false
-        } else withinActionRadius = false
+        if (TARGET == null && closestTarget != null) {
+            setTarget(closestTarget)
+            target = TARGET
+        }
 
         // Pick closest resource
         var closestResource: Resource? = null
@@ -225,11 +213,24 @@ open class Agent(
         } else resourceField = null
 
 
-        //val avgSocietalCredit = if (sameCount + otherCount > 0) societalCredit / (sameCount + otherCount) else 0f
+        var acuteScore = 0f
+        var targetedByRenegadeCount = 0f
+        var minTargetedDistance = 1000f
+        var closestTargetedBy: Agent? = null
+        for (i in 0 until targetedBy.size) {
+            val other = targetedBy[i] ?: continue
+            if (!isRenegade && other.isRenegade) {
+                targetedByRenegadeCount++
+            }
+            acuteScore += 1f * other.KILL_COUNT
+            val distance = cheapDistance(this, other)
+            if (distance < minTargetedDistance) {
+                minTargetedDistance = distance
+                closestTargetedBy = other
+            }
+        }
 
-        // 1 -> neuron is on, casts vote to influence if state is true
-        // 0 -> neuron is off, doesnt vote because state is false/not relevant
-        // -1 -> neuron is on, contribute negatively when state is true
+        // ====== State calculations ======
 
         val sameHueCenterDX =
             if (sameCount > 0) (sameDX / sameCount) / detectionRadius else 0f
@@ -262,38 +263,63 @@ open class Agent(
             (1f - dist / detectionRadius) // Inverse distance
         } else 0f
 
-        val sameHueGroupStrength = (sameCount / (PRESENCE_CAP / 3f))
-        val otherHueGroupStrength = (otherCount / (PRESENCE_CAP / 3f))
+        val sameHueGroupStrength = (sameCount / GROUP_SIZE)
+        val otherHueGroupStrength = (otherCount / GROUP_SIZE)
 
         val renegadeCenterDX =
-            if (renegadeCount > 0) (renegadeDX / renegadeCount) / detectionRadius else 0f
+            if (renegadeGroupCount > 0) (renegadeDX / renegadeGroupCount) / detectionRadius else 0f
         val renegadeCenterDY =
-            if (renegadeCount > 0) (renegadeDY / renegadeCount) / detectionRadius else 0f
-        val renegadeThreat = if (renegadeCount > 0) {
-            val avgDX = renegadeDX / renegadeCount
-            val avgDY = renegadeDY / renegadeCount
+            if (renegadeGroupCount > 0) (renegadeDY / renegadeGroupCount) / detectionRadius else 0f
+        val renegadeDistance = if (renegadeGroupCount > 0) {
+            val avgDX = renegadeDX / renegadeGroupCount
+            val avgDY = renegadeDY / renegadeGroupCount
 
             val dist = cheapDistance(avgDX, avgDY)
 
             (1f - dist / detectionRadius) // Inverse distance
         } else 0f
-        val renegadeStrength = renegadeValue / (PRESENCE_CAP / 3f)
+        val renegadeGroupStrength = (renegadeStrength / renegadeGroupCount) / GROUP_SIZE
 
-        val target = TARGET as Agent?
         val targetDX = if (target != null) (target.x - x) / targetRadius else 0f
         val targetDY = if (target != null) (target.y - y) / targetRadius else 0f
         val targetDistance = if (target != null) cheapDistance(this, target) / targetRadius else 0f
 
+        val invDangerDistance = 1 - (minTargetedDistance / targetRadius)
+
+
         val totalCount = sameCount + otherCount
-        val crowdingState = ((totalCount - (PRESENCE_CAP / 3f)) / (PRESENCE_CAP / 3f))
-        val aloneState = -crowdingState
+        val crowdingState = ((totalCount - GROUP_SIZE) / GROUP_SIZE)
 
         val resourceDX = if (closestResource != null) closestResource.x / detectionRadius else 0f
         val resourceDY = if (closestResource != null) closestResource.y / detectionRadius else 0f
         val resourceDistance = if (closestResource != null)
             cheapDistance(this, closestResource) / detectionRadius else 0f
 
-        // Latest = 27
+        // Danger states
+        val dangerState = if (isRenegade) {
+            if (renegadeStrength == 0f) 1f else renegadeStrength * 1f - renegadeDistance
+        } else renegadeStrength * renegadeDistance
+
+        val safetyScore = if (!isRenegade) (1 - sameHueDistance) * sameHueGroupStrength
+        else renegadeDistance * renegadeGroupStrength
+
+        val fightOrFlight = if (acuteScore == 0f) {
+            0f
+        } else if (targetedByRenegadeCount < 2f || acuteScore <= safetyScore) { // Fight response
+            invDangerDistance
+        } else -invDangerDistance // Flight response
+
+        if (fightOrFlight > 0.33f) { // Switch target to attacker if threatened
+            setTarget(closestTargetedBy)
+        }
+
+        withinActionRadius = actionRadiusCheck(TARGET)
+
+        // 1 -> neuron is on, casts vote to influence if state is true
+        // 0 -> neuron is off, doesn't vote because state is false/not relevant
+        // -1 -> neuron is on, contribute inversely when state is true
+
+        // Latest = 29
         state[0] = 1f // Bias/drive state, always on
 
         // Directional symmetry states (-1f, 1f)
@@ -305,26 +331,31 @@ open class Agent(
         state[12] = renegadeCenterDY.coerceIn(-1f, 1f)
         state[20] = targetDX.coerceIn(-1f, 1f)
         state[21] = targetDY.coerceIn(-1f, 1f)
+        state[18] = crowdingState.coerceIn(-1f, 1f) // Pulled towards a group of (PRESENCE_CAP / 3f)
 
         // Unilateral states
         state[3] = sameHueDistance.coerceIn(0f, 1f) // Sensory, no eval
         state[4] = sameHueGroupStrength.coerceIn(0f, 1f)
         state[7] = otherHueThreat.coerceIn(0f, 1f) // Sensory, no eval
         state[8] = otherHueGroupStrength.coerceIn(0f, 1f)
-        state[13] = renegadeThreat.coerceIn(0f, 1f) // Sensory, no eval
+        state[13] = renegadeDistance.coerceIn(0f, 1f) // Sensory, no eval
         state[14] = renegadeStrength.coerceIn(0f, 1f)
-        state[18] = crowdingState.coerceIn(0f, 1f)
-        state[19] = aloneState.coerceIn(0f, 1f)
         state[23] = targetDistance.coerceIn(0f, 1f)
+
+        // Acute states
+        state[19] = dangerState.coerceIn(0f, 1f)
+        state[28] = fightOrFlight.coerceIn(-1f, 1f) // 1 = fight, -1 = flight
+        //state[29] = 0f // rest/wander TBA
+
 
         // Self-sensory states
         state[10] = (CREDIT / creditDenominator).coerceIn(0f, 1f)
-        state[17] = if (RENEGADE > 0) 1f else 0f
+        state[17] = if (isRenegade) 1f else 0f
 
         // Target sensory
         state[9] = if (target == null) 0f else if (target.hue == hue) 1f else -1f
         state[15] = if (target == null) 0f else if (target.sex != sex) 1f else -1f
-        state[16] = if (target == null) 0f else if (target.RENEGADE > 0) 1f else 0f
+        state[16] = if (target == null) 0f else if (target.isRenegade) 1f else 0f
         state[24] = if (target == null) 0f else (target.CREDIT / creditDenominator).coerceIn(0f, 1f)
         state[22] = if (withinActionRadius) 1f else 0f
 
@@ -335,6 +366,7 @@ open class Agent(
 
         // Metadata
         network.metaData[0] = CREDIT
+        network.metaData[3] = if (isRenegade) 1f else 0f
     }
 
     private fun generateMetaData() {
@@ -388,8 +420,12 @@ open class Agent(
 
                 else -> {
 
-                    if (TARGET == null) return
+                    if (TARGET == null) {
+                        network.valence -= 0.1f
+                        return
+                    }
                     val target = TARGET as Agent
+                    if (!target.enabled) return
 
                     when (choice) {
                         mate -> {
@@ -402,7 +438,7 @@ open class Agent(
                                             network.valence += 0.5f
                                         }
                                     } else network.valence -= 0.5f
-                                }
+                                } else network.valence -= 0.2f
                                 return
                             }
 
@@ -437,33 +473,25 @@ open class Agent(
                                         val creditGain = if (CREDIT > 0) (CREDIT + target.CREDIT) / CREDIT else 1f
                                         network.valence += (1 - creditGain) / 0.5f // 50% gain = 1f
                                     }
-                                    if (target.RENEGADE > 0) network.valence += 1f
-                                }
+                                    if (target.isRenegade != isRenegade) network.valence += 1f
+                                } else network.valence -= 0.2f
                                 return
                             }
 
                             Main.killAttempts.incrementAndGet()
                             if (withinActionRadius) {
                                 if (target.hue == hue) {
-                                    RENEGADE += 50
                                     Main.killedOwnHue.incrementAndGet()
-                                    CREDIT += target.CREDIT
-                                    target.CREDIT = 0f
-                                    kill(target)
-                                    TARGET = null
-                                    targetCooldown = 50
-                                    Main.populationCounter.decrementAndGet()
                                 } else {
-                                    RENEGADE += 10f
                                     Main.killedOtherHue.incrementAndGet()
-                                    CREDIT += target.CREDIT
-                                    target.CREDIT = 0f
-                                    kill(target)
-                                    TARGET = null
-                                    targetCooldown = 50
-                                    Main.populationCounter.decrementAndGet()
                                 }
-                                if (target.RENEGADE > 0) network.valence += 1f
+                                CREDIT += target.CREDIT
+                                target.CREDIT = 0f
+                                kill(target)
+                                clearTarget()
+                                targetCooldown = 50
+                                if (!target.isRenegade) isRenegade = true
+                                if (target.isRenegade && !isRenegade) network.valence += 1f
                             }
                             targetCooldown = 10
                         }
@@ -508,9 +536,54 @@ open class Agent(
 
     }
 
+    private fun setTarget(target: Agent?) {
+        if (TARGET != null) clearTarget()
+        TARGET = target ?: return
+        for (i in 0 until target.targetedBy.size) {
+            if (target.targetedBy[i] == null) {
+                target.targetedBy[i] = this
+                return
+            }
+        }
+    }
+
+    fun clearTarget() {
+        val target = TARGET ?: return
+        for (i in 0 until target.targetedBy.size) {
+            if (target.targetedBy[i] === this) {
+                target.targetedBy[i] = null
+                TARGET = null
+            }
+        }
+    }
+
+    private fun actionRadiusCheck(target: Agent?): Boolean {
+        if (target == null) return false
+        if (!target.enabled) return false
+
+        val dx = target.x - x
+        val dy = target.y - y
+        val targetDistSq = dx * dx + dy * dy
+        val actionRadiusSq = actionRadius * actionRadius
+        if (targetDistSq > 0.000001f && targetDistSq <= actionRadiusSq) {
+            val moveLenSq = facingX * facingX + facingY * facingY
+            if (moveLenSq > 0.000001f) {
+                val forward = facingX * dx + facingY * dy
+                if (forward > 0 && forward * forward > targetDistSq * moveLenSq * 0.25f) {
+                    return true
+                } else return false
+            } else return false
+        } else return false
+
+    }
+
     private fun kill(target: Agent) {
         // Death related logic
+        if (!target.enabled) return
         target.enabled = false
+        KILL_COUNT++
+        managePopHueCounter(target.hue, false)
+        Main.populationCounter.decrementAndGet()
         Simulation.occupancyGrid[target.x.toInt()][target.y.toInt()] = false // clear occupancy
     }
 

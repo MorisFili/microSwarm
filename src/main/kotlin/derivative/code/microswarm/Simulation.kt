@@ -24,7 +24,7 @@ class Simulation(
         val MAX_ENTITY_COUNT = 5000
         val INITIAL_ENTITY_COUNT = 1000
 
-        val palette = arrayOf( // Reserver: green = resource fields, red
+        val palette = arrayOf( // Reserved: green = resource fields, red = renegades
             Color.MAGENTA,
             Color.WHITE,
             Color.HOTPINK,
@@ -35,7 +35,7 @@ class Simulation(
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 28
+        const val NET_IN = 29
         const val NET_OUT = 5
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
@@ -61,10 +61,10 @@ class Simulation(
             Resource(i, x, y)
         }
     }
+    val activeAgents = arrayOfNulls<Agent>(MAX_ENTITY_COUNT)
     var multiThreaded = true
-    val workerCount = 8 // Change to dynamic later
+    val workerCount = Runtime.getRuntime().availableProcessors()
     private val threads = Executors.newFixedThreadPool(workerCount)
-    private val chunkSize = (MAX_ENTITY_COUNT + workerCount - 1) / workerCount
     private val futures = mutableListOf<Future<*>>()
 
     fun shutDownThreads() { threads.shutdownNow() }
@@ -80,6 +80,7 @@ class Simulation(
         // Fill occupancy grid with spawn coordinates
         for (entity in agents) {
             if (entity == null) continue
+            managePopHueCounter(entity.hue)
             occupancyGrid[entity.x.toInt()][entity.y.toInt()] = true
         }
         Main.populationCounter.set(INITIAL_ENTITY_COUNT)
@@ -91,17 +92,35 @@ class Simulation(
         gridUpdate()
 
         if (multiThreaded) {
-            // First async phase
+
+            // Fill active agent array
+            var activeAgentsCount = 0
+            activeAgents.fill(null)
+            for (agent in agents) {
+                if (agent == null) continue
+                if (!agent.enabled) continue
+                activeAgents[activeAgentsCount] = agent
+                activeAgentsCount++
+            }
+
+            val chunkSize = (activeAgentsCount + workerCount - 1) / workerCount
+
             var index = 0
             futures.clear()
-            while (index < MAX_ENTITY_COUNT) {
+
+            // Sync phase
+            for (i in 0 until activeAgentsCount) {
+                activeAgents[i]!!.syncGenerateIntent()
+            }
+
+            // Async phase
+            while (index < activeAgentsCount) {
                 val from = index
-                val to = minOf(from + chunkSize, MAX_ENTITY_COUNT)
+                val to = minOf(from + chunkSize, activeAgentsCount)
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        val agent = agents[i]
-                        if (agent != null && agent.enabled) agent.asyncGenerateIntent()
+                        activeAgents[i]!!.asyncFeedForward()
                         i++
                     }
                 }
@@ -111,32 +130,30 @@ class Simulation(
             for (future in futures) future.get()
 
             // Sync phase
-            for (entity in agents) {
-                if (entity == null) continue
-                if (!entity.enabled) continue
-                entity.syncPerformAction()
-                if (entity.MATE_CONDITION) {
-                    if (entity.TARGET != null) {
+            for (i in 0 until activeAgentsCount) {
+                val agent = activeAgents[i]!!
+                agent.syncPerformAction()
+                if (agent.MATE_CONDITION) {
+                    if (agent.TARGET != null) {
                         if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
-                            reproduce(entity, entity.TARGET as Agent)
+                            reproduce(agent, agent.TARGET as Agent)
                         }
                     }
-                    entity.MATE_CONDITION = false
-                    entity.TARGET = null
+                    agent.MATE_CONDITION = false
+                    agent.clearTarget()
                 }
             }
 
-            // Second async phase
+            // Async phase
             index = 0
             futures.clear()
-            while (index < MAX_ENTITY_COUNT) {
+            while (index < activeAgentsCount) {
                 val from = index
-                val to = minOf(from + chunkSize, MAX_ENTITY_COUNT)
+                val to = minOf(from + chunkSize, activeAgentsCount)
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        val agent = agents[i]
-                        if (agent != null && agent.enabled) agent.asyncActionEvaluation()
+                        activeAgents[i]!!.asyncActionEvaluation()
                         i++
                     }
                 }
@@ -146,23 +163,20 @@ class Simulation(
             for (future in futures) future.get()
 
             // Second sync phase
-            for (entity in agents) {
-                if (entity == null) continue
-                if (!entity.enabled) continue
-                entity.syncMovement()
+            for (i in 0 until activeAgentsCount) {
+                activeAgents[i]!!.syncMovement()
             }
 
-            // Third async phase
+            // Second async phase
             index = 0
             futures.clear()
-            while (index < MAX_ENTITY_COUNT) {
+            while (index < activeAgentsCount) {
                 val from = index
-                val to = minOf(from + chunkSize, MAX_ENTITY_COUNT)
+                val to = minOf(from + chunkSize, activeAgentsCount)
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        val agent = agents[i]
-                        if (agent != null && agent.enabled) agent.asyncStateEvaluation()
+                        activeAgents[i]!!.asyncStateEvaluation()
                         i++
                     }
                 }
@@ -172,10 +186,12 @@ class Simulation(
             for (future in futures) future.get()
 
         } else {
+            // Single thread loop
             for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
-                entity.asyncGenerateIntent()
+                entity.syncGenerateIntent()
+                entity.asyncFeedForward()
                 entity.syncPerformAction()
                 if (entity.MATE_CONDITION) {
                     if (entity.TARGET != null) {
@@ -184,7 +200,7 @@ class Simulation(
                         }
                     }
                     entity.MATE_CONDITION = false
-                    entity.TARGET = null
+                    entity.clearTarget()
                 }
                 entity.asyncActionEvaluation()
                 entity.syncMovement()
@@ -214,7 +230,7 @@ class Simulation(
                 if (!entity.enabled) continue
                 if (entity.sex) totalMale++
                 if (entity.apathic) totalApathic++
-                if (entity.RENEGADE > 0) totalRene++
+                if (entity.isRenegade) totalRene++
                 totalCred += entity.CREDIT
             }
             Main.GLOBAL_AVG_CREDIT = totalCred.toInt() / Main.populationCounter.get() // Populated in init
@@ -288,9 +304,11 @@ class Simulation(
             nextAgent.enabled = true
             nextAgent.CREDIT = 0f
             nextAgent.sex = rng.nextFloat() < 0.5f
+            nextAgent.isRenegade = a1.isRenegade || a2.isRenegade
             nextAgent.apathic = a1.apathic || a2.apathic // dominant trait test
         }
         Main.populationCounter.incrementAndGet()
+        managePopHueCounter(hue)
     }
 
     private fun getNearestUnoccupiedCoordinate(x: Float, y: Float): IntArray {
