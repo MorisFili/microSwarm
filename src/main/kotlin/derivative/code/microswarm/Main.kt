@@ -54,10 +54,13 @@ class Main : Application() {
 
         @Volatile
         var MAX_SIM_TICK_TIME = 0
+
         @Volatile
         var TICKS_OVER_12 = 0
+
         @Volatile
         var TICKS_OVER_16 = 0
+
         @Volatile
         var TICKS_OVER_20 = 0
 
@@ -78,6 +81,7 @@ class Main : Application() {
 
         @Volatile
         var VAL_MULTIPL = 1f
+
         @Volatile
         var LR_MULTIPL = 1f
 
@@ -93,6 +97,7 @@ class Main : Application() {
         val pinkAgents = AtomicInteger(0)
         val orangeAgents = AtomicInteger(0)
         val blueAgents = AtomicInteger(0)
+        val starvationCounter = AtomicInteger(0)
     }
 
     // Class properties
@@ -120,7 +125,7 @@ class Main : Application() {
     }
 
     @Volatile
-    private var RUNNING = false
+    var RUNNING = false
 
     val simLoop: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable).apply { isDaemon = true }
@@ -366,7 +371,7 @@ class Main : Application() {
         val agentColorLabel = Label().apply {
             textFill = Color.rgb(220, 225, 235)
         }
-        val killedLabel = Label().apply {
+        val deathLabel = Label().apply {
             textFill = Color.rgb(220, 225, 235)
         }
         val spawnLabel = Label().apply {
@@ -379,8 +384,10 @@ class Main : Application() {
         val space = Region()
         HBox.setHgrow(space, Priority.ALWAYS)
 
-        bottomArea.children.addAll(populationLabel, agentColorLabel,
-            killedLabel, spawnLabel, space, systemInfoLabel)
+        bottomArea.children.addAll(
+            populationLabel, agentColorLabel,
+            deathLabel, spawnLabel, space, systemInfoLabel
+        )
 
         rightPanel.children.add(bottomArea)
 
@@ -458,27 +465,38 @@ class Main : Application() {
                                     "Global Avg. Credit: $GLOBAL_AVG_CREDIT"
                         agentColorLabel.text =
                             "Population Hues\n" +
-                                    "Magenta: %.2f%%\n".format(magentaAgents.get().toDouble() /
-                                            popCounter * 100.0) +
-                                    "White: %.2f%%\n".format(whiteAgents.get().toDouble() /
-                                            popCounter * 100.0) +
-                                    "Pink: %.2f%%\n".format(pinkAgents.get().toDouble() /
-                                            popCounter * 100.0) +
-                                    "Orange: %.2f%%\n".format(orangeAgents.get().toDouble() /
-                                            popCounter * 100.0) +
-                                    "Blue: %.2f%%\n".format(blueAgents.get().toDouble() /
-                                            popCounter * 100.0)
-                        killedLabel.text =
-                            "Killed Other Hue: ${killedOtherHue.get()}\n" +
-                                    "Killed Same Hue: ${killedOwnHue.get()}\n" +
-                                    "Kill Attempts: ${killAttempts.get()}"
+                                    "Magenta: %.2f%%\n".format(
+                                        magentaAgents.get().toDouble() /
+                                                popCounter * 100.0
+                                    ) +
+                                    "White: %.2f%%\n".format(
+                                        whiteAgents.get().toDouble() /
+                                                popCounter * 100.0
+                                    ) +
+                                    "Pink: %.2f%%\n".format(
+                                        pinkAgents.get().toDouble() /
+                                                popCounter * 100.0
+                                    ) +
+                                    "Orange: %.2f%%\n".format(
+                                        orangeAgents.get().toDouble() /
+                                                popCounter * 100.0
+                                    ) +
+                                    "Blue: %.2f%%\n".format(
+                                        blueAgents.get().toDouble() /
+                                                popCounter * 100.0
+                                    )
+                        deathLabel.text =
+                            "Killed By Other: ${killedOtherHue.get()}\n" +
+                                    "Killed By Same: ${killedOwnHue.get()}\n" +
+                                    "Kill Attempts: ${killAttempts.get()}\n" +
+                                    "Starvation: ${starvationCounter.get()}"
                         spawnLabel.text =
                             "Spawned Other Hue: ${spawnedWithOtherHue.get()}\n" +
                                     "Spawned Same Hue: ${spawnedWithOwnHue.get()}\n" +
                                     "Spawn Attempts: ${spawnAttempts.get()}"
                         systemInfoLabel.text =
                             "--- Over 100 loops: --- \n" +
-                            "Avg. Loop Time: ${AVG_SIM_TICK_TIME / 1000f}ms \n" +
+                                    "Avg. Loop Time: ${AVG_SIM_TICK_TIME / 1000f}ms \n" +
                                     "Max Loop Time: ${MAX_SIM_TICK_TIME / 1000f}ms \n" +
                                     "Loops over 12ms: $TICKS_OVER_12 \n" +
                                     "Loops over 16ms: $TICKS_OVER_16 \n" +
@@ -490,27 +508,27 @@ class Main : Application() {
             }
         }, 0, 400, TimeUnit.MILLISECONDS)
 
-            object : AnimationTimer() {
-                override fun handle(now: Long) {
-                    if (RUNNING) {
-                        graphicsContext.fill = Color.BLACK
-                        graphicsContext.fillRect(0.0, 0.0, canvas.width, canvas.height)
+        object : AnimationTimer() {
+            override fun handle(now: Long) {
+                // optional RUNNING boolean gate
+                graphicsContext.fill = Color.BLACK
+                graphicsContext.fillRect(0.0, 0.0, canvas.width, canvas.height)
 
-                        for (resource in resources) {
-                            if (!resource.enabled) continue
-                            graphicsContext.fill = resource.hue ?: Color.WHITE
-                            graphicsContext.fillRect(resource.x.toDouble(), resource.y.toDouble(), 2.0, 2.0)
-                        }
-
-                        for (entity in agents) {
-                            if (entity == null) continue
-                            if (!entity.enabled) continue
-                            graphicsContext.fill = entity.hue ?: Color.WHITE
-                            graphicsContext.fillRect(entity.x.toDouble(), entity.y.toDouble(), 1.0, 1.0)
-                        }
-                    }
+                for (resource in resources) {
+                    if (!resource.enabled) continue
+                    graphicsContext.fill = resource.hue ?: Color.WHITE
+                    graphicsContext.fillRect(resource.x.toDouble(), resource.y.toDouble(), 2.0, 2.0)
                 }
-            }.start()
+
+                for (entity in agents) {
+                    if (entity == null) continue
+                    if (!entity.enabled) continue
+                    graphicsContext.fill = entity.hue ?: Color.WHITE
+                    graphicsContext.fillRect(entity.x.toDouble(), entity.y.toDouble(), 1.0, 1.0)
+                }
+
+            }
+        }.start()
 
         stage.scene = scene
         stage.width = Screen.getPrimary().visualBounds.width

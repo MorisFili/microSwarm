@@ -35,8 +35,7 @@ class Simulation(
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 29
-        const val NET_OUT = 5
+        const val NET_IN = 36
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
             Array(CELLS_PER_COLUMN) {
@@ -50,7 +49,7 @@ class Simulation(
                 val x = rng.nextFloat(0f, CANVAS_X.toFloat())
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
                 val hue = palette[rng.nextInt(palette.size)]
-                val nn = Network(NET_IN, NET_OUT)
+                val nn = Network(NET_IN, 2,4,4)
                 nextAgentIndex++
                 Agent(x, y, i, hue, network = nn)
             } else null
@@ -101,6 +100,11 @@ class Simulation(
                 if (!agent.enabled) continue
                 activeAgents[activeAgentsCount] = agent
                 activeAgentsCount++
+            }
+
+            if (activeAgentsCount == 0) { // All dead
+                application.RUNNING = false
+                return
             }
 
             val chunkSize = (activeAgentsCount + workerCount - 1) / workerCount
@@ -167,7 +171,7 @@ class Simulation(
                 activeAgents[i]!!.syncMovement()
             }
 
-            // Second async phase
+            // Last phase (async)
             index = 0
             futures.clear()
             while (index < activeAgentsCount) {
@@ -209,6 +213,7 @@ class Simulation(
         }
 
         for (resource in resources) {
+            resource.update()
             if (resource.value <= 0) {
                 val coordinates = getNearestUnoccupiedCoordinate(
                     rng.nextFloat(1000f),
@@ -230,7 +235,7 @@ class Simulation(
                 if (!entity.enabled) continue
                 if (entity.sex) totalMale++
                 if (entity.apathic) totalApathic++
-                if (entity.isRenegade) totalRene++
+                if (entity.REPUTATION < 0.5f) totalRene++
                 totalCred += entity.CREDIT
             }
             Main.GLOBAL_AVG_CREDIT = totalCred.toInt() / Main.populationCounter.get() // Populated in init
@@ -289,22 +294,20 @@ class Simulation(
         val weights = Network.WeightsPackage(
             input, intent, intentInput, outputIntent
         )
-        val nn = Network(NET_IN, NET_OUT)
+        val nn = Network(NET_IN, 2,4,4)
 
         val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {
             agents[nextAgentIndex] = Agent(x, y, nextAgentIndex, hue, true, nn)
-            agents[nextAgentIndex]?.importWeights(weights)
+            agents[nextAgentIndex]!!.importWeights(weights)
             nextAgentIndex++
         } else {
             nextAgent.x = x
             nextAgent.y = y
             nextAgent.hue = hue
             nextAgent.importWeights(weights)
-            nextAgent.enabled = true
-            nextAgent.CREDIT = 0f
+            nextAgent.resetState()
             nextAgent.sex = rng.nextFloat() < 0.5f
-            nextAgent.isRenegade = a1.isRenegade || a2.isRenegade
             nextAgent.apathic = a1.apathic || a2.apathic // dominant trait test
         }
         Main.populationCounter.incrementAndGet()

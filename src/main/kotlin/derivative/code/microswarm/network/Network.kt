@@ -10,15 +10,18 @@ import kotlin.math.tanh
 
 
 class Network(
-    val networkInput: Int,
-    val networkOutput: Int
+    val inputStates: Int,
+    val movementAxis: Int,
+    val actionPairs: Int,
+    val preferenceNeurons: Int
 ) {
 
     // Fixed Variables
-    private val inputNeurons = networkInput
-    private val activityNeurons = networkInput
-    private val intentNeurons = (networkInput / 2) + 1
-    private val outputNeurons = networkOutput * 2
+    val networkOutputs = movementAxis + actionPairs + preferenceNeurons
+    private val inputNeurons = inputStates
+    private val activityNeurons = inputStates
+    private val intentNeurons = (inputStates / 2) + 1
+    private val outputNeurons = ((movementAxis + actionPairs) * 2) + preferenceNeurons
     private val learningRate = 0.08f
     private val weightDecay = 0.99985f // For the deepest layer
     private val maxMemory = 1.0f
@@ -27,8 +30,10 @@ class Network(
     val ACTION_THRESHOLD = 0.5f
     val THREAT_KILL_INTENT_INDEX = intentNeurons - 1// Last index
     val KILL_ACTION_INDEX = 4
-    val THREAT_INPUT_INDEX = 28
-    val ACTIONRADIUS_INDEX = 22
+    val ADRENALINE_INDEX = 0
+    val THREATENED_INDEX = 28
+    val ACTIONRADIUS_INDEX = 26
+
     // Util
     private val rng = Random()
 
@@ -68,7 +73,7 @@ class Network(
     private var appliedReward = 0f
     var metaData = FloatArray(10) // Arbitrary size for now
     var valence = 0f
-    var actionReward = false
+    var actionEvaluation = false
     var explorationSignal = false
 
     // Avg reward debug
@@ -83,7 +88,9 @@ class Network(
         matrixBiasSeeder(weightsIntent)
         matrixBiasSeeder(intentInputWeights)
         matrixBiasSeeder(outputIntentWeights)
-        for (i in 4..9) { // Output indices that are action based
+        val movementIndices = movementAxis * 2
+        val actionIndices = actionPairs * 2
+        for (i in movementIndices until movementIndices + actionIndices) { // Output indices that are action based
             outputIsAction[i] = true
         }
         seedAllReflexes()
@@ -124,7 +131,7 @@ class Network(
             var sumInt = 0f
             for (j in 0 until intentNeurons) {
                 val weightsOI = outputIntentWeights[i][j] + outputIntentMemory[i][j]
-                if (i == KILL_ACTION_INDEX && j == THREAT_KILL_INTENT_INDEX) { // Fight reflex
+                if (i == KILL_ACTION_INDEX && j == THREAT_KILL_INTENT_INDEX) { // Kill reflex
                     sumOI += outputIntentWeights[i][j] * interactionIntent[j] * input[ACTIONRADIUS_INDEX] //
                     continue
                 }
@@ -140,14 +147,15 @@ class Network(
         val KILL = (output[4] - output[5]).coerceIn(0.05f, 1f)
         val MATE = (output[6] - output[7]).coerceIn(0.05f, 1f)
         val WORK = (output[8] - output[9]).coerceIn(0.05f, 1f)
+        val EAT = (output[10] - output[11]).coerceIn(0.05f, 1f)
+        val CHOICE = maxOf(KILL, MATE, WORK, EAT)
+        if (CHOICE < ACTION_THRESHOLD) {
 
-        if (maxOf(KILL, MATE, WORK) < ACTION_THRESHOLD) {
-
-            val ACTION_CHANCE = maxOf(KILL, MATE, WORK) / ACTION_THRESHOLD
+            val ACTION_CHANCE = CHOICE / ACTION_THRESHOLD
 
             if (rng.nextFloat() < ACTION_CHANCE) {
                 explorationSignal = true
-                val CHANCE = (KILL + MATE + WORK) * rng.nextFloat()
+                val CHANCE = (KILL + MATE + WORK + EAT) * rng.nextFloat()
                 if (CHANCE < KILL) {
                     output[4] = 1f
                     output[5] = 0f
@@ -155,6 +163,8 @@ class Network(
                     output[7] = 0f
                     output[8] = 0f
                     output[9] = 0f
+                    output[10] = 0f
+                    output[11] = 0f
                 } else if (CHANCE < KILL + MATE) {
                     output[4] = 0f
                     output[5] = 0f
@@ -162,38 +172,73 @@ class Network(
                     output[7] = 0f
                     output[8] = 0f
                     output[9] = 0f
-                } else {
+                    output[10] = 0f
+                    output[11] = 0f
+                } else if (CHANCE < KILL + MATE + WORK) {
                     output[4] = 0f
                     output[5] = 0f
                     output[6] = 0f
                     output[7] = 0f
                     output[8] = 1f
                     output[9] = 0f
+                    output[10] = 0f
+                    output[11] = 0f
+                } else {
+                    output[4] = 0f
+                    output[5] = 0f
+                    output[6] = 0f
+                    output[7] = 0f
+                    output[8] = 0f
+                    output[9] = 0f
+                    output[10] = 1f
+                    output[11] = 0f
                 }
             }
 
-        } else if (maxOf(KILL, MATE, WORK) >= ACTION_THRESHOLD) {
+        } else if (CHOICE >= ACTION_THRESHOLD) {
             // Keep winner, flatten rest
-            if (KILL >= MATE && KILL >= WORK) {
-                output[6] = 0f
-                output[7] = 0f
-                output[8] = 0f
-                output[9] = 0f
-            } else if (MATE >= KILL && MATE >= WORK) {
-                output[4] = 0f
-                output[5] = 0f
-                output[8] = 0f
-                output[9] = 0f
-            } else {
-                output[4] = 0f
-                output[5] = 0f
-                output[6] = 0f
-                output[7] = 0f
+            when (CHOICE) {
+                KILL -> {
+                    output[6] = 0f
+                    output[7] = 0f
+                    output[8] = 0f
+                    output[9] = 0f
+                    output[10] = 0f
+                    output[11] = 0f
+                }
+
+                MATE -> {
+                    output[4] = 0f
+                    output[5] = 0f
+                    output[8] = 0f
+                    output[9] = 0f
+                    output[10] = 0f
+                    output[11] = 0f
+                }
+
+                WORK -> {
+                    output[4] = 0f
+                    output[5] = 0f
+                    output[6] = 0f
+                    output[7] = 0f
+                    output[10] = 0f
+                    output[11] = 0f
+                }
+
+                EAT -> {
+                    output[4] = 0f
+                    output[5] = 0f
+                    output[6] = 0f
+                    output[7] = 0f
+                    output[8] = 0f
+                    output[9] = 0f
+                }
             }
+
         }
 
         // Per-axis stress injection
-        val flightValue = (-inputArray[28]).coerceIn(0f, 1f)
+        val flightValue = inputArray[ADRENALINE_INDEX].coerceIn(0f, 1f)
         val flightX = sign(output[0] - output[1]) * if (flightValue > 0.3f) flightValue else 0f
         val flightY = sign(output[2] - output[3]) * if (flightValue > 0.3f) flightValue else 0f
         val moveX = output[0] - output[1] + flightX
@@ -206,14 +251,14 @@ class Network(
             output[2] = rng.nextFloat(1f)
             output[3] = rng.nextFloat(1f)
         }
-
-        for (i in 0 until networkOutput) outputArray[i] = output[i * 2] - output[i * 2 + 1]
-
+        val actionPairsIndex = movementAxis + actionPairs
+        for (i in 0 until actionPairsIndex) outputArray[i] = output[i * 2] - output[i * 2 + 1]
+        for (i in actionPairsIndex until networkOutputs) outputArray[i] = output[i + actionPairsIndex]
 
     }
 
     fun actionEvaluation() {
-        actionReward = true
+        actionEvaluation = true
 
         // Currency accumulation
         valence += evaluateResourceGain(metaData[0], metaData[1], metaData[2])
@@ -221,7 +266,7 @@ class Network(
         if (abs(valence) >= 0.0001f) backpropContribution(valence)
 
         explorationSignal = false
-        actionReward = false
+        actionEvaluation = false
     }
 
 
@@ -229,63 +274,52 @@ class Network(
 
         val detectionRadius = 40f
         val targetRadius = detectionRadius / 2f
-        val isRenegade = metaData[3] == 1f
-        //val numbingCoefficient = 1f // In high acute states others matter less
+        // Exploration signal boundary > 0.35f
+        val inverseExplorationScalar = if (postState[33] <= 0.35f) 1f else 1 - postState[33]
 
-        // sameHue attraction DX + DY * hueStrength
-        valence += evaluateSmallerBetter(
-            preState[1], postState[1],
-            detectionRadius, postState[4], isRenegade
-        )
-        valence += evaluateSmallerBetter(
-            preState[2], postState[2],
-            detectionRadius, postState[4], isRenegade
-        )
+        // Adrenaline decrease signal
+        valence += evaluateSmallerBetter(preState[0], postState[0], scalar = inverseExplorationScalar)
 
-        // otherHue avoidance DX + DY * hueStrength
-        valence += evaluateSmallerBetter(
-            preState[5], postState[5],
-            detectionRadius, postState[8], inverse = true
-        )
-        valence += evaluateSmallerBetter(
-            preState[6], postState[6],
-            detectionRadius, postState[8], inverse = true
-        )
-
-        // Renegade avoidance DX + DY * renegadeStrength
-        valence += evaluateSmallerBetter(
-            preState[11], postState[11],
-            detectionRadius, postState[14], !isRenegade
-        )
-        valence += evaluateSmallerBetter(
-            preState[12], postState[12],
-            detectionRadius, postState[14], !isRenegade
-        )
+        // Serotonin increase signal
+        valence += evaluateSmallerBetter(preState[2], postState[2], inverse = true, scalar = inverseExplorationScalar)
 
         // Crowding
-        valence += evaluateSmallerBetter(preState[18], postState[18], 1f
-        )
-
-        // Danger States
-        valence += evaluateSmallerBetter(preState[19], postState[19], 1f
-        )
-        valence += evaluateSmallerBetter(preState[28], postState[28], 1f)
-
-        // Target chasing distanceDelta * 1-distance (distance remaining scalar)
         valence += evaluateSmallerBetter(
-            preState[23], postState[23],
-            targetRadius, (1 - postState[23])
+            preState[27], postState[27],
+            scalar = inverseExplorationScalar
+        )
+        // Discomfort
+        valence += evaluateSmallerBetter(preState[35], postState[35], scalar = inverseExplorationScalar)
+        // Danger
+        valence += evaluateSmallerBetter(preState[28], postState[28])
+        // Safety
+        valence += evaluateSmallerBetter(
+            preState[31], postState[31],
+            scalar = inverseExplorationScalar, inverse = true
+        )
+        // Decreasing hunger (eating)
+        valence += evaluateSmallerBetter(preState[34], postState[34])
+
+        // Target chasing distanceDelta
+        valence += evaluateSmallerBetter(
+            preState[20], postState[20],
+            targetRadius, postState[20]
         )
 
         // Resource center distance
-        valence += evaluateSmallerBetter(preState[27], postState[27],
-            detectionRadius)
+        valence += evaluateSmallerBetter(
+            preState[17], postState[17],
+            detectionRadius
+        )
+
+        // Exploration pressure
+        valence += evaluateExploration(postState[33])
 
         valence /= max(1, contributingStatesCounter)
 
         if (abs(valence) > 0.001f) {
             val adaptiveMultiplier = (0.2f / avgReward.coerceAtLeast(0.0001f)).coerceIn(0.1f, 10f)
-            val finalValence = valence * adaptiveMultiplier
+            val finalValence = valence * if (abs(valence) > 0.01f) adaptiveMultiplier else 1f
             backpropContribution(finalValence.coerceIn(-1f, 1f))
         } else valence = 0f
         contributingStatesCounter = 0
@@ -294,7 +328,7 @@ class Network(
     private fun evaluateSmallerBetter(
         preState: Float,
         postState: Float,
-        maxRadius: Float,
+        maxRadius: Float = 1f,
         scalar: Float = 1f,
         inverse: Boolean = false
     ): Float {
@@ -315,6 +349,15 @@ class Network(
         return valenceOut
     }
 
+    private fun evaluateExploration(postState: Float): Float {
+        if (postState <= 0.35f) return 0f // exploration not relevant
+        val isMovingForward = if (metaData[4] >= 0.03f) 1f else -1f // within 160 degree cone
+        val movementValue = metaData[5] * isMovingForward
+        val valenceOut = movementValue * postState
+        if (abs(valenceOut) > 0.1f) contributingStatesCounter++
+        return valenceOut
+    }
+
     private fun evaluateResourceGain(preValue: Float, postValue: Float, divisor: Float): Float {
         if (preValue <= 0f) return 0f
         val normalizedPre = preValue / divisor
@@ -329,11 +372,11 @@ class Network(
         for (i in 0 until backpropBucket.size) backpropBucket[i] = 0f
         for (i in 0 until intentBucket.size) intentBucket[i] = 0f
 
-        // Contribution calculation
-        for (i in 0 until outputNeurons step 2) {
+        // Contribution calculation for pairs
+        for (i in 0 until outputNeurons - preferenceNeurons step 2) {
             val isActionPair = outputIsAction[i]
 
-            if (isActionPair != actionReward) continue // Not updated this loop
+            if (isActionPair != actionEvaluation) continue // Not updated this loop
             val outcome = output[i] - output[i + 1]
             val axisDirection = sign(outcome)
             if (axisDirection == 0f) continue
@@ -353,6 +396,13 @@ class Network(
             backpropBucket[i] += appliedReward * contributionGate * axisDirection
             backpropBucket[i + 1] += -appliedReward * contributionGate2 * axisDirection
 
+        }
+
+        // Contribution calculation for singles (currently only target preferences)
+        for (i in outputNeurons - preferenceNeurons until outputNeurons) {
+            if (!actionEvaluation) continue // Evaluate only during action evaluation (targeting)
+            val contribution = calculateContribution(output[i].coerceIn(-1f, 1f))
+            backpropBucket[i] += appliedReward * contribution
         }
 
         for (i in 0 until backpropContribution.size) backpropContribution[i] += backpropBucket[i]
@@ -460,14 +510,16 @@ class Network(
 
     private fun seedIntentReflexes(
         intentNeuronIndex: Int, inputReflexIndex: Int,
-        value: Float, positive: Boolean = true) {
+        value: Float, positive: Boolean = true
+    ) {
         val reflexValue = if (positive) value else -value
         intentInputWeights[intentNeuronIndex][inputReflexIndex] = reflexValue
     }
 
     private fun seedOutputReflexes(
         outputNeuronIndex: Int, intentReflexIndex: Int,
-        value: Float, positive: Boolean = true) {
+        value: Float, positive: Boolean = true
+    ) {
         val reflexValue = if (positive) value else -value
         outputIntentWeights[outputNeuronIndex][intentReflexIndex] = reflexValue
     }
@@ -577,11 +629,16 @@ class Network(
     }
 
     private fun seedAllReflexes() {
-        seedIntentReflexes(THREAT_KILL_INTENT_INDEX,
-            THREAT_INPUT_INDEX, 1f)
-        seedOutputReflexes(KILL_ACTION_INDEX,
-            THREAT_KILL_INTENT_INDEX, 1f)
+        seedIntentReflexes(
+            THREAT_KILL_INTENT_INDEX,
+            THREATENED_INDEX, 1f
+        )
+        seedOutputReflexes(
+            KILL_ACTION_INDEX,
+            THREAT_KILL_INTENT_INDEX, 1f
+        )
     }
+
     private fun resetMutables() {
         // Plastic weights
         for (i in 0 until memoryIn.size) {
@@ -607,7 +664,7 @@ class Network(
 
         // Rolling variables
         valence = 0f
-        actionReward = false
+        actionEvaluation = false
         explorationSignal = false
     }
 
@@ -676,9 +733,14 @@ class Network(
             block.append("Output[${i}]: ${output[i]}\n")
         }
         block.append("===== Action: =====\n")
-        for (i in 0 until networkOutput) {
-            block.append("Action[${i}]: ${output[i * 2] - output[i * 2 + 1]}\n")
-        }
+
+        block.append("X-Axis: ${output[0] - output[1]}\n")
+        block.append("Y-Axis: ${output[2] - output[3]}\n")
+        block.append("Kill: ${output[4] - output[5]}\n")
+        block.append("Mate: ${output[6] - output[7]}\n")
+        block.append("Work: ${output[8] - output[9]}\n")
+        block.append("Eat: ${output[10] - output[11]}\n")
+
 
         block.append("===== Accessories: =====\n")
         block.append("EFFECTIVE REWARD: $appliedReward \n")
