@@ -5,7 +5,8 @@ import derivative.code.microswarm.Main.Companion.CANVAS_X
 import derivative.code.microswarm.Main.Companion.CANVAS_Y
 import derivative.code.microswarm.entity.Agent
 import derivative.code.microswarm.entity.Entity
-import derivative.code.microswarm.entity.Resource
+import derivative.code.microswarm.entity.Food
+import derivative.code.microswarm.entity.GeneticMaterial
 import derivative.code.microswarm.network.Network
 import javafx.application.Platform
 import javafx.scene.paint.Color
@@ -35,7 +36,7 @@ class Simulation(
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 36
+        const val NET_IN = 37
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
             Array(CELLS_PER_COLUMN) {
@@ -49,30 +50,33 @@ class Simulation(
                 val x = rng.nextFloat(0f, CANVAS_X.toFloat())
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
                 val hue = palette[rng.nextInt(palette.size)]
-                val nn = Network(NET_IN, 2,4,4)
+                val nn = Network(NET_IN, 2, 3, 3)
                 nextAgentIndex++
                 Agent(x, y, i, hue, network = nn)
             } else null
         }
-        val resources = Array(50) { i ->
-            val x = rng.nextFloat(i * 20f, (i + 1) * 20f)
-            val y = rng.nextFloat(1000f)
-            Resource(i, x, y)
+        val foods = Array(50) { i ->
+            val x = rng.nextFloat(50f,950f)
+            val y = rng.nextFloat(50f,950f)
+            Food(i, x, y)
         }
     }
+
     val activeAgents = arrayOfNulls<Agent>(MAX_ENTITY_COUNT)
     var multiThreaded = true
     val workerCount = Runtime.getRuntime().availableProcessors()
     private val threads = Executors.newFixedThreadPool(workerCount)
     private val futures = mutableListOf<Future<*>>()
 
-    fun shutDownThreads() { threads.shutdownNow() }
+    fun shutDownThreads() {
+        threads.shutdownNow()
+    }
 
     var triggerCounter = 0
 
     init {
 
-        for (resource in resources) {
+        for (resource in foods) {
             occupancyGrid[resource.x.toInt()][resource.y.toInt()] = true
         }
 
@@ -138,11 +142,10 @@ class Simulation(
                 val agent = activeAgents[i]!!
                 agent.syncPerformAction()
                 if (agent.MATE_CONDITION) {
-                    if (agent.TARGET != null) {
-                        if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
-                            reproduce(agent, agent.TARGET as Agent)
-                        }
+                    if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
+                        reproduce(agent, agent.INCUBATION_MATERIAL!!)
                     }
+
                     agent.MATE_CONDITION = false
                     agent.clearTarget()
                 }
@@ -200,7 +203,7 @@ class Simulation(
                 if (entity.MATE_CONDITION) {
                     if (entity.TARGET != null) {
                         if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
-                            reproduce(entity, entity.TARGET as Agent)
+                            reproduce(entity, entity.INCUBATION_MATERIAL!!)
                         }
                     }
                     entity.MATE_CONDITION = false
@@ -212,33 +215,30 @@ class Simulation(
             }
         }
 
-        for (resource in resources) {
+        for (resource in foods) {
             resource.update()
             if (resource.value <= 0) {
                 val coordinates = getNearestUnoccupiedCoordinate(
-                    rng.nextFloat(1000f),
-                    rng.nextFloat(1000f)
+                    rng.nextFloat(50f,950f),
+                    rng.nextFloat(50f,950f)
                 )
                 resource.x = coordinates[0].toFloat()
                 resource.y = coordinates[1].toFloat()
-                resource.value = 1000f
+                resource.value = resource.MAX_VALUE
             }
         }
 
         if (triggerCounter >= 25) {
-            var totalCred = 0f
             var totalMale = 0
             var totalApathic = 0
             var totalRene = 0
             for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
-                if (entity.sex) totalMale++
-                if (entity.apathic) totalApathic++
+                if (entity.isMale) totalMale++
+                if (entity.isApathic) totalApathic++
                 if (entity.REPUTATION < 0.5f) totalRene++
-                totalCred += entity.CREDIT
             }
-            Main.GLOBAL_AVG_CREDIT = totalCred.toInt() / Main.populationCounter.get() // Populated in init
             Main.MALE_POP = totalMale
             Main.APATHIC_POP = totalApathic
             Main.RENEGADE_POP = totalRene
@@ -247,43 +247,47 @@ class Simulation(
 
     }
 
-    private fun reproduce(a1: Agent, a2: Agent) {
+    private fun reproduce(a1: Agent, a2: GeneticMaterial) {
         val a1weights = a1.exportWeights()
-        val a2weights = a2.exportWeights()
+        val a2weights = a2.weights
 
         val input = a1weights.transferInput
         val input2 = a2weights.transferInput
         for (i in 0 until input.size) {
-            for (j in 0 until input[i].size) {
-                if (rng.nextFloat() < 0.5f) continue
-                input[i][j] = input2[i][j]
+            if (rng.nextFloat() < 0.5f) {
+                for (j in input[i].indices) input[i][j] = input2[i][j]
             }
         }
 
         val intent = a1weights.transferIntent
         val intent2 = a2weights.transferIntent
         for (i in 0 until intent.size) {
-            for (j in 0 until intent[i].size) {
-                if (rng.nextFloat() < 0.5f) continue
-                intent[i][j] = intent2[i][j]
+            if (rng.nextFloat() < 0.5f) {
+                for (j in intent[i].indices) intent[i][j] = intent2[i][j]
             }
         }
 
-        val intentInput = a1weights.transferIntentInput
-        val intentInput2 = a2weights.transferIntentInput
-        for (i in 0 until intentInput.size) {
-            for (j in 0 until intentInput[i].size) {
-                if (rng.nextFloat() < 0.5f) continue
-                intentInput[i][j] = intentInput2[i][j]
+        val adrenal = a1weights.transferAdrenergic
+        val adrenal2 = a2weights.transferAdrenergic
+        for (i in 0 until adrenal.size) {
+            if (rng.nextFloat() < 0.5f) {
+                for (j in adrenal[i].indices) adrenal[i][j] = adrenal2[i][j]
             }
         }
 
-        val outputIntent = a1weights.transferOutputIntent
-        val outputIntent2 = a2weights.transferOutputIntent
-        for (i in 0 until outputIntent.size) {
-            for (j in 0 until outputIntent[i].size) {
-                if (rng.nextFloat() < 0.5f) continue
-                outputIntent[i][j] = outputIntent2[i][j]
+        val dopamine = a1weights.transferDopaminergic
+        val dopamine2 = a2weights.transferDopaminergic
+        for (i in 0 until dopamine.size) {
+            if (rng.nextFloat() < 0.5f) {
+                for (j in dopamine[i].indices) dopamine[i][j] = dopamine2[i][j]
+            }
+        }
+
+        val sero = a1weights.transferSerotonergic
+        val sero2 = a2weights.transferSerotonergic
+        for (i in 0 until sero.size) {
+            if (rng.nextFloat() < 0.5f) {
+                for (j in sero[i].indices) sero[i][j] = sero2[i][j]
             }
         }
 
@@ -292,9 +296,10 @@ class Simulation(
         val y = spawnCoordinates[1].toFloat()
         val hue = (if (rng.nextFloat() < 0.5f) a1.hue else a2.hue) ?: Color.WHITE
         val weights = Network.WeightsPackage(
-            input, intent, intentInput, outputIntent
+            input, intent,
+            adrenal, dopamine, sero
         )
-        val nn = Network(NET_IN, 2,4,4)
+        val nn = Network(NET_IN, 2, 3, 3)
 
         val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {
@@ -307,8 +312,8 @@ class Simulation(
             nextAgent.hue = hue
             nextAgent.importWeights(weights)
             nextAgent.resetState()
-            nextAgent.sex = rng.nextFloat() < 0.5f
-            nextAgent.apathic = a1.apathic || a2.apathic // dominant trait test
+            nextAgent.isMale = rng.nextFloat() < 0.5f
+            nextAgent.isApathic = a1.isApathic || a2.apathic // dominant trait test
         }
         Main.populationCounter.incrementAndGet()
         managePopHueCounter(hue)
@@ -351,7 +356,7 @@ class Simulation(
             }
         }
 
-        for (entity in resources) {
+        for (entity in foods) {
             if (!entity.enabled) continue
             val gx = (entity.x / CELL_SIZE).toInt()
             val gy = (entity.y / CELL_SIZE).toInt()

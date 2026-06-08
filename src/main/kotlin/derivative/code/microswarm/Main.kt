@@ -1,7 +1,7 @@
 package derivative.code.microswarm
 
 import derivative.code.microswarm.Simulation.Companion.agents
-import derivative.code.microswarm.Simulation.Companion.resources
+import derivative.code.microswarm.Simulation.Companion.foods
 import javafx.animation.AnimationTimer
 import javafx.application.Application
 import javafx.application.Platform
@@ -14,8 +14,10 @@ import javafx.scene.control.Button
 import javafx.scene.control.CheckBox
 import javafx.scene.control.ComboBox
 import javafx.scene.control.Label
+import javafx.scene.control.RadioButton
 import javafx.scene.control.ScrollPane
 import javafx.scene.control.Slider
+import javafx.scene.control.ToggleGroup
 import javafx.scene.input.Clipboard
 import javafx.scene.input.ClipboardContent
 import javafx.scene.layout.Background
@@ -68,9 +70,6 @@ class Main : Application() {
         var SELECTED_AGENT_ID = 0
 
         @Volatile
-        var GLOBAL_AVG_CREDIT = 0
-
-        @Volatile
         var MALE_POP = 0
 
         @Volatile
@@ -78,12 +77,11 @@ class Main : Application() {
 
         @Volatile
         var RENEGADE_POP = 0
-
         @Volatile
-        var VAL_MULTIPL = 1f
-
+        var showIncubating = false
         @Volatile
-        var LR_MULTIPL = 1f
+        var showStarving = false
+
 
         val populationCounter = AtomicInteger(0)
         val killedOwnHue = AtomicInteger(0)
@@ -273,61 +271,52 @@ class Main : Application() {
 
         val instrumentPanel = VBox().apply {
             maxWidthProperty().bind(innerPanel.widthProperty().multiply(0.5))
+            //padding = Insets(0.0, 0.0, 0.0, 0.0) // top, right, bottom, left
             prefHeight = 700.0
             maxHeight = 700.0
         }
 
-        val learningAmplifierSlider = Slider().apply {
-            min = 1.0
-            max = 10.0
-            value = 1.0
+        val highLightGroup = ToggleGroup()
 
-            valueProperty().addListener { _, _, newVal ->
-                VAL_MULTIPL = newVal.toFloat()
+        val highlightNone = RadioButton("None").apply {
+            textFill = Color.rgb(220, 225, 235)
+            padding = Insets(10.0)
+            toggleGroup = highLightGroup
+            isSelected = true  // default
+        }
+
+        val highlightHungry = RadioButton("Highlight Hungry").apply {
+            textFill = Color.rgb(220, 225, 235)
+            padding = Insets(10.0)
+            toggleGroup = highLightGroup
+        }
+
+        val highlightIncubating = RadioButton("Highlight Incubating").apply {
+            textFill = Color.rgb(220, 225, 235)
+            padding = Insets(10.0)
+            toggleGroup = highLightGroup
+        }
+
+        highLightGroup.selectedToggleProperty().addListener { _, _, newToggle ->
+            when (newToggle) {
+                highlightHungry -> {
+                    showStarving = true
+                    showIncubating = false
+                }
+                highlightIncubating -> {
+                    showStarving = false
+                    showIncubating = true
+                }
+                else -> {
+                    showStarving = false
+                    showIncubating = false
+                }
             }
         }
-        val learningAmplifierLabel = Label().apply {
-            textFill = Color.rgb(220, 225, 235)
-            textProperty().bind(
-                Bindings.createStringBinding(
-                    {
-                        "Valence Multiplier: %.3f".format(VAL_MULTIPL)
-                    },
-                    learningAmplifierSlider.valueProperty()
-                )
-            )
-        }
-        val valenceAmpBox = VBox(learningAmplifierLabel, learningAmplifierSlider).apply {
-            spacing = 6.0
-            padding = Insets(12.0)
-        }
 
-        val learningRateSlider = Slider().apply {
-            min = 1.0
-            max = 10.0
-            value = 1.0
 
-            valueProperty().addListener { _, _, newVal ->
-                LR_MULTIPL = newVal.toFloat()
-            }
-        }
-        val learningRateLabel = Label().apply {
-            textFill = Color.rgb(220, 225, 235)
-            textProperty().bind(
-                Bindings.createStringBinding(
-                    {
-                        "Learning rate: %.3f".format(LR_MULTIPL)
-                    },
-                    learningRateSlider.valueProperty()
-                )
-            )
-        }
-        val learningRateBox = VBox(learningRateLabel, learningRateSlider).apply {
-            spacing = 6.0
-            padding = Insets(12.0)
-        }
 
-        instrumentPanel.children.addAll(valenceAmpBox, learningRateBox)
+        instrumentPanel.children.addAll(highlightNone, highlightHungry, highlightIncubating)
 
         HBox.setHgrow(scrollableWrapper, Priority.ALWAYS)
         HBox.setHgrow(instrumentPanel, Priority.ALWAYS)
@@ -461,8 +450,7 @@ class Main : Application() {
                             "Population: ${popCounter}\n" +
                                     "Male pop: $MALE_POP \n" +
                                     "Apathic pop: $APATHIC_POP \n" +
-                                    "Renegade pop: $RENEGADE_POP \n" +
-                                    "Global Avg. Credit: $GLOBAL_AVG_CREDIT"
+                                    "Renegade pop: $RENEGADE_POP \n"
                         agentColorLabel.text =
                             "Population Hues\n" +
                                     "Magenta: %.2f%%\n".format(
@@ -514,17 +502,21 @@ class Main : Application() {
                 graphicsContext.fill = Color.BLACK
                 graphicsContext.fillRect(0.0, 0.0, canvas.width, canvas.height)
 
-                for (resource in resources) {
-                    if (!resource.enabled) continue
-                    graphicsContext.fill = resource.hue ?: Color.WHITE
-                    graphicsContext.fillRect(resource.x.toDouble(), resource.y.toDouble(), 2.0, 2.0)
+                for (agent in agents) {
+                    if (agent == null) continue
+                    if (!agent.enabled) continue
+                    graphicsContext.fill = if (showIncubating) {
+                        if (agent.INCUBATING) Color.RED else Color.WHITE
+                    } else if (showStarving) {
+                        if (agent.ENERGY < 50f) Color.RED else Color.WHITE
+                    } else agent.hue
+                    graphicsContext.fillRect(agent.x.toDouble(), agent.y.toDouble(), 1.0, 1.0)
                 }
 
-                for (entity in agents) {
-                    if (entity == null) continue
-                    if (!entity.enabled) continue
-                    graphicsContext.fill = entity.hue ?: Color.WHITE
-                    graphicsContext.fillRect(entity.x.toDouble(), entity.y.toDouble(), 1.0, 1.0)
+                for (resource in foods) {
+                    if (!resource.enabled) continue
+                    graphicsContext.fill = resource.hue
+                    graphicsContext.fillRect(resource.x.toDouble(), resource.y.toDouble(), 2.0, 2.0)
                 }
 
             }

@@ -1,6 +1,9 @@
 package derivative.code.microswarm
 
 import javafx.scene.paint.Color
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 fun managePopHueCounter(hue: Color?, increment: Boolean = true) {
     if (hue == null) return
@@ -67,3 +70,6 @@ val discountLookup = floatArrayOf(
     0.076945f
 )
 
+val TABLE_SIZE = 4096
+val sinTable = FloatArray(TABLE_SIZE) { sin(it * 2.0 * PI / TABLE_SIZE).toFloat() }
+val cosTable = FloatArray(TABLE_SIZE) { cos(it * 2.0 * PI / TABLE_SIZE).toFloat() }

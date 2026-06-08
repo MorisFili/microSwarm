@@ -1,9 +1,7 @@
 package derivative.code.microswarm.network
 
-import derivative.code.microswarm.discountLookup
 import java.util.*
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.sign
 import kotlin.math.tanh
@@ -20,7 +18,7 @@ class Network(
     val networkOutputs = movementAxis + actionPairs + preferenceNeurons
     private val inputNeurons = inputStates
     private val activityNeurons = inputStates
-    private val intentNeurons = (inputStates / 2) + 1
+    private val intentNeurons = inputStates / 2
     private val outputNeurons = ((movementAxis + actionPairs) * 2) + preferenceNeurons
     private val learningRate = 0.08f
     private val weightDecay = 0.99985f // For the deepest layer
@@ -28,11 +26,6 @@ class Network(
 
     //private val activationThreshold = 0.13f
     val ACTION_THRESHOLD = 0.5f
-    val THREAT_KILL_INTENT_INDEX = intentNeurons - 1// Last index
-    val KILL_ACTION_INDEX = 4
-    val ADRENALINE_INDEX = 0
-    val THREATENED_INDEX = 28
-    val ACTIONRADIUS_INDEX = 26
 
     // Util
     private val rng = Random()
@@ -42,9 +35,11 @@ class Network(
         Array(activityNeurons) { FloatArray(inputNeurons) }
     private val weightsIntent: Array<FloatArray> =
         Array(intentNeurons) { FloatArray(activityNeurons) }
-    private val intentInputWeights: Array<FloatArray> =
-        Array(intentNeurons) { FloatArray(inputNeurons) }
-    private val outputIntentWeights: Array<FloatArray> =
+    private val adrenalOutputWeights: Array<FloatArray> =
+        Array(outputNeurons) { FloatArray(intentNeurons) }
+    private val dopaminergicOutputWeights: Array<FloatArray> =
+        Array(outputNeurons) { FloatArray(intentNeurons) }
+    private val serotonergicOutputWeights: Array<FloatArray> =
         Array(outputNeurons) { FloatArray(intentNeurons) }
     private val hiddenBiasWeights: FloatArray = FloatArray(activityNeurons)
 
@@ -53,41 +48,55 @@ class Network(
         Array(activityNeurons) { FloatArray(inputNeurons) }
     private val memoryIntent: Array<FloatArray> =
         Array(intentNeurons) { FloatArray(activityNeurons) }
-    private val intentInputMemory: Array<FloatArray> =
-        Array(intentNeurons) { FloatArray(inputNeurons) }
-    private val outputIntentMemory: Array<FloatArray> =
+    private val adrenalOutputMemory: Array<FloatArray> =
+        Array(outputNeurons) { FloatArray(intentNeurons) }
+    private val dopaminergicOutputMemory: Array<FloatArray> =
+        Array(outputNeurons) { FloatArray(intentNeurons) }
+    private val serotonergicOutputMemory: Array<FloatArray> =
         Array(outputNeurons) { FloatArray(intentNeurons) }
     private val outputIsAction = BooleanArray(outputNeurons) { false }
 
     // Rolling Variables
     private var input = FloatArray(inputNeurons)
     private var intent = FloatArray(intentNeurons)
-    private var interactionIntent = FloatArray(intentNeurons)
     private var activity = FloatArray(activityNeurons)
-    private var output = FloatArray(outputNeurons)
-    private val backpropContribution = FloatArray(outputNeurons)
-    private val backpropBucket = FloatArray(outputNeurons)
+    private var adrenalOutput = FloatArray(outputNeurons)
+    private var dopaminergicOutput = FloatArray(outputNeurons)
+    private var serotonergicOutput = FloatArray(outputNeurons)
+    private var outputSum = FloatArray(outputNeurons)
+    private var adrenalContribution = FloatArray(outputNeurons)
+    private var dopaminergicContribution = FloatArray(outputNeurons)
+    private var serotonergicContribution = FloatArray(outputNeurons)
+    private val adrenalBucket = FloatArray(outputNeurons)
+    private val dopaBucket = FloatArray(outputNeurons)
+    private val seroBucket = FloatArray(outputNeurons)
     private val intentContribution = FloatArray(intentNeurons)
     private val intentBucket = FloatArray(intentNeurons)
     private val activityContribution = FloatArray(activityNeurons)
     private var appliedReward = 0f
-    var metaData = FloatArray(10) // Arbitrary size for now
+    var metaData = FloatArray(10) // Unused for now
     var valence = 0f
     var actionEvaluation = false
     var explorationSignal = false
+    var pendingActionBucket = 3
 
     // Avg reward debug
-    var rewCounter = 0
-    var accuReward = 0f
-    var avgReward = 0f
-    var contributingStatesCounter = 0
+    var adrMagMulti = 1f
+    var dopMagMulti = 1f
+    var serMagMulti = 1f
+    var adrMagAcc = 0f
+    var dopMagAcc = 0f
+    var serMagAcc = 0f
+    var multiplierCounter = 0f
+
 
     init {
         arrayBiasSeeder(hiddenBiasWeights)
         matrixBiasSeeder(weightsInput)
         matrixBiasSeeder(weightsIntent)
-        matrixBiasSeeder(intentInputWeights)
-        matrixBiasSeeder(outputIntentWeights)
+        matrixBiasSeeder(adrenalOutputWeights)
+        matrixBiasSeeder(dopaminergicOutputWeights)
+        matrixBiasSeeder(serotonergicOutputWeights)
         val movementIndices = movementAxis * 2
         val actionIndices = actionPairs * 2
         for (i in movementIndices until movementIndices + actionIndices) { // Output indices that are action based
@@ -118,80 +127,71 @@ class Network(
                 sum += weight * activity[j]
             }
             intent[i] = tanh(sum)
-
-            var inputContext = 0f
-            for (k in 0 until inputNeurons) {
-                inputContext += input[k] * (intentInputWeights[i][k] + intentInputMemory[i][k])
-            }
-            interactionIntent[i] = tanh(inputContext)
         }
 
         for (i in 0 until outputNeurons) {
-            var sumOI = 0f
-            var sumInt = 0f
+            var sumAdr = 0f
             for (j in 0 until intentNeurons) {
-                val weightsOI = outputIntentWeights[i][j] + outputIntentMemory[i][j]
-                if (i == KILL_ACTION_INDEX && j == THREAT_KILL_INTENT_INDEX) { // Kill reflex
-                    sumOI += outputIntentWeights[i][j] * interactionIntent[j] * input[ACTIONRADIUS_INDEX] //
-                    continue
-                }
-                sumOI += weightsOI * intent[j]
-                sumInt += weightsOI * interactionIntent[j]
+                val weightsOI = adrenalOutputWeights[i][j] + adrenalOutputMemory[i][j]
+                sumAdr += weightsOI * intent[j]
             }
-            val interaction = sumOI * sumInt
-            val drive = if (abs(interaction) > abs(sumOI)) interaction else sumOI
-            output[i] = max(0f, drive) // ReLU
+
+            var sumDopa = 0f
+            for (j in 0 until intentNeurons) {
+                val weightsOI = dopaminergicOutputWeights[i][j] + dopaminergicOutputMemory[i][j]
+                sumDopa += weightsOI * intent[j]
+            }
+
+            var sumSero = 0f
+            for (j in 0 until intentNeurons) {
+                val weightsOI = serotonergicOutputWeights[i][j] + serotonergicOutputMemory[i][j]
+                sumSero += weightsOI * intent[j]
+            }
+
+            adrenalOutput[i] = sumAdr
+            dopaminergicOutput[i] = sumDopa
+            serotonergicOutput[i] = sumSero
+            outputSum[i] = max(0f, sumAdr + sumDopa + sumSero) // ReLU Interference
         }
 
         // Softmax-Argmax-like logic for actions
-        val KILL = (output[4] - output[5]).coerceIn(0.05f, 1f)
-        val MATE = (output[6] - output[7]).coerceIn(0.05f, 1f)
-        val WORK = (output[8] - output[9]).coerceIn(0.05f, 1f)
-        val EAT = (output[10] - output[11]).coerceIn(0.05f, 1f)
-        val CHOICE = maxOf(KILL, MATE, WORK, EAT)
+        val KILL = (outputSum[4] - outputSum[5]).coerceIn(0.05f, 1f)
+        val MATE = (outputSum[6] - outputSum[7]).coerceIn(0.05f, 1f)
+        val EAT = (outputSum[8] - outputSum[9]).coerceIn(0.05f, 1f)
+
+        val CHOICE = maxOf(KILL, MATE, EAT)
+
         if (CHOICE < ACTION_THRESHOLD) {
 
             val ACTION_CHANCE = CHOICE / ACTION_THRESHOLD
 
             if (rng.nextFloat() < ACTION_CHANCE) {
                 explorationSignal = true
-                val CHANCE = (KILL + MATE + WORK + EAT) * rng.nextFloat()
+                val CHANCE = (KILL + MATE + EAT) * rng.nextFloat()
                 if (CHANCE < KILL) {
-                    output[4] = 1f
-                    output[5] = 0f
-                    output[6] = 0f
-                    output[7] = 0f
-                    output[8] = 0f
-                    output[9] = 0f
-                    output[10] = 0f
-                    output[11] = 0f
+                    outputSum[4] = 1f
+                    outputSum[5] = 0f
+                    outputSum[6] = 0f
+                    outputSum[7] = 0f
+                    outputSum[8] = 0f
+                    outputSum[9] = 0f
+                    pendingActionBucket = 0
                 } else if (CHANCE < KILL + MATE) {
-                    output[4] = 0f
-                    output[5] = 0f
-                    output[6] = 1f
-                    output[7] = 0f
-                    output[8] = 0f
-                    output[9] = 0f
-                    output[10] = 0f
-                    output[11] = 0f
-                } else if (CHANCE < KILL + MATE + WORK) {
-                    output[4] = 0f
-                    output[5] = 0f
-                    output[6] = 0f
-                    output[7] = 0f
-                    output[8] = 1f
-                    output[9] = 0f
-                    output[10] = 0f
-                    output[11] = 0f
+                    outputSum[4] = 0f
+                    outputSum[5] = 0f
+                    outputSum[6] = 1f
+                    outputSum[7] = 0f
+                    outputSum[8] = 0f
+                    outputSum[9] = 0f
+                    pendingActionBucket = 1
                 } else {
-                    output[4] = 0f
-                    output[5] = 0f
-                    output[6] = 0f
-                    output[7] = 0f
-                    output[8] = 0f
-                    output[9] = 0f
-                    output[10] = 1f
-                    output[11] = 0f
+                    outputSum[4] = 0f
+                    outputSum[5] = 0f
+                    outputSum[6] = 0f
+                    outputSum[7] = 0f
+                    outputSum[8] = 1f
+                    outputSum[9] = 0f
+                    pendingActionBucket = 2
                 }
             }
 
@@ -199,71 +199,43 @@ class Network(
             // Keep winner, flatten rest
             when (CHOICE) {
                 KILL -> {
-                    output[6] = 0f
-                    output[7] = 0f
-                    output[8] = 0f
-                    output[9] = 0f
-                    output[10] = 0f
-                    output[11] = 0f
+                    outputSum[6] = 0f
+                    outputSum[7] = 0f
+                    outputSum[8] = 0f
+                    outputSum[9] = 0f
+                    pendingActionBucket = 0
                 }
 
                 MATE -> {
-                    output[4] = 0f
-                    output[5] = 0f
-                    output[8] = 0f
-                    output[9] = 0f
-                    output[10] = 0f
-                    output[11] = 0f
-                }
-
-                WORK -> {
-                    output[4] = 0f
-                    output[5] = 0f
-                    output[6] = 0f
-                    output[7] = 0f
-                    output[10] = 0f
-                    output[11] = 0f
+                    outputSum[4] = 0f
+                    outputSum[5] = 0f
+                    outputSum[8] = 0f
+                    outputSum[9] = 0f
+                    pendingActionBucket = 1
                 }
 
                 EAT -> {
-                    output[4] = 0f
-                    output[5] = 0f
-                    output[6] = 0f
-                    output[7] = 0f
-                    output[8] = 0f
-                    output[9] = 0f
+                    outputSum[4] = 0f
+                    outputSum[5] = 0f
+                    outputSum[6] = 0f
+                    outputSum[7] = 0f
+                    pendingActionBucket = 2
                 }
             }
 
         }
 
-        // Per-axis stress injection
-        val flightValue = inputArray[ADRENALINE_INDEX].coerceIn(0f, 1f)
-        val flightX = sign(output[0] - output[1]) * if (flightValue > 0.3f) flightValue else 0f
-        val flightY = sign(output[2] - output[3]) * if (flightValue > 0.3f) flightValue else 0f
-        val moveX = output[0] - output[1] + flightX
-        val moveY = output[2] - output[3] + flightY
 
-        // Random exploration when standing still
-        if (abs(moveX) < 0.001f && abs(moveY) < 0.001f && rng.nextFloat() < 0.2f) {
-            output[0] = rng.nextFloat(1f)
-            output[1] = rng.nextFloat(1f)
-            output[2] = rng.nextFloat(1f)
-            output[3] = rng.nextFloat(1f)
-        }
         val actionPairsIndex = movementAxis + actionPairs
-        for (i in 0 until actionPairsIndex) outputArray[i] = output[i * 2] - output[i * 2 + 1]
-        for (i in actionPairsIndex until networkOutputs) outputArray[i] = output[i + actionPairsIndex]
+        for (i in 0 until actionPairsIndex) outputArray[i] = outputSum[i * 2] - outputSum[i * 2 + 1]
+        for (i in actionPairsIndex until networkOutputs) outputArray[i] = outputSum[i + actionPairsIndex]
 
     }
 
     fun actionEvaluation() {
         actionEvaluation = true
 
-        // Currency accumulation
-        valence += evaluateResourceGain(metaData[0], metaData[1], metaData[2])
-
-        if (abs(valence) >= 0.0001f) backpropContribution(valence)
+        if (abs(valence) >= 0.0001f) backpropContribution(valence, pendingActionBucket)
 
         explorationSignal = false
         actionEvaluation = false
@@ -272,104 +244,113 @@ class Network(
 
     fun stateEvaluation(preState: FloatArray, postState: FloatArray) {
 
-        val detectionRadius = 40f
-        val targetRadius = detectionRadius / 2f
-        // Exploration signal boundary > 0.35f
-        val inverseExplorationScalar = if (postState[33] <= 0.35f) 1f else 1 - postState[33]
+        if (multiplierCounter > 10) {
+            adrMagMulti = adrMagAcc / multiplierCounter
+            dopMagMulti = dopMagAcc / multiplierCounter
+            serMagMulti = serMagAcc / multiplierCounter
+            multiplierCounter = 0f
+            adrMagAcc = 0f
+            dopMagAcc = 0f
+            serMagAcc = 0f
+        }
 
-        // Adrenaline decrease signal
-        valence += evaluateSmallerBetter(preState[0], postState[0], scalar = inverseExplorationScalar)
+        // ===================== Adrenaline Path =====================
+        val adrMulti = if (adrMagMulti > 0) (0.2f / adrMagMulti).coerceIn(0.1f, 300f) else 1f
+        val adr = evaluateSmallerBetter(preState[0], postState[0], noiseGate = 0.00001f)
+        adrMagAcc += abs(adr)
 
-        // Serotonin increase signal
-        valence += evaluateSmallerBetter(preState[2], postState[2], inverse = true, scalar = inverseExplorationScalar)
+        // Decreasing discomfort
+        val disc = evaluateSmallerBetter(preState[35], postState[35])
+        adrMagAcc += abs(disc)
 
-        // Crowding
-        valence += evaluateSmallerBetter(
-            preState[27], postState[27],
-            scalar = inverseExplorationScalar
-        )
-        // Discomfort
-        valence += evaluateSmallerBetter(preState[35], postState[35], scalar = inverseExplorationScalar)
-        // Danger
-        valence += evaluateSmallerBetter(preState[28], postState[28])
-        // Safety
-        valence += evaluateSmallerBetter(
-            preState[31], postState[31],
-            scalar = inverseExplorationScalar, inverse = true
-        )
+        // Decreasing threat
+        val thr = evaluateSmallerBetter(preState[28], postState[28])
+        adrMagAcc += abs(thr)
+
+
+        val adrVal = ((adr + disc + thr) * adrMulti).coerceIn(-1f, 1f)
+        if (abs(adrVal) > 0f) {
+            backpropContribution(adrVal, 0)
+        }
+
+
+        // ===================== Dopamine Path =====================
+        val dopMulti = if (dopMagMulti > 0) (0.15f / dopMagMulti).coerceIn(0.1f, 200f) else 1f
+        val dop = evaluateSmallerBetter(preState[1], postState[1], noiseGate = 0.0001f, inverse = true)
+        dopMagAcc += abs(dop)
+
+        // Resource distance
+        val res = evaluateDecreaseDistance(preState[17], postState[17])
+        dopMagAcc += abs(res)
+
+        // Food exploration
+        val food = evaluateSmallerBetter(preState[33], postState[33]) * postState[34]
+        dopMagAcc += abs(food)
+
+        val dopVal = ((dop + res + food) * dopMulti).coerceIn(-1f, 1f)
+        if (abs(dopVal) > 0f) {
+            backpropContribution(dopVal, 1)
+        }
+
+
+        // ===================== Serotonin Path =====================
+        val serMulti = if (serMagMulti > 0) (0.15f / serMagMulti).coerceIn(0.1f, 200f) else 1f
+        val ser = evaluateSmallerBetter(preState[2], postState[2], noiseGate = 0.0001f, inverse = true)
+        serMagAcc += abs(ser)
+
         // Decreasing hunger (eating)
-        valence += evaluateSmallerBetter(preState[34], postState[34])
+        val hun = evaluateSmallerBetter(preState[34], postState[34])
+        serMagAcc += abs(hun)
 
-        // Target chasing distanceDelta
-        valence += evaluateSmallerBetter(
-            preState[20], postState[20],
-            targetRadius, postState[20]
-        )
+        val serVal = ((ser + hun) * serMulti).coerceIn(-1f, 1f)
+        if (abs(serVal) > 0f) {
+            backpropContribution(serVal, 2)
+        }
 
-        // Resource center distance
-        valence += evaluateSmallerBetter(
-            preState[17], postState[17],
-            detectionRadius
-        )
+        // ===================== Ambiguous Path =====================
+        // Target distance
+        val tar = evaluateDecreaseDistance(preState[20], postState[20])
+        backpropContribution(tar)
 
-        // Exploration pressure
-        valence += evaluateExploration(postState[33])
 
-        valence /= max(1, contributingStatesCounter)
-
-        if (abs(valence) > 0.001f) {
-            val adaptiveMultiplier = (0.2f / avgReward.coerceAtLeast(0.0001f)).coerceIn(0.1f, 10f)
-            val finalValence = valence * if (abs(valence) > 0.01f) adaptiveMultiplier else 1f
-            backpropContribution(finalValence.coerceIn(-1f, 1f))
-        } else valence = 0f
-        contributingStatesCounter = 0
+        multiplierCounter++
     }
 
     private fun evaluateSmallerBetter(
         preState: Float,
         postState: Float,
-        maxRadius: Float = 1f,
-        scalar: Float = 1f,
+        noiseGate: Float = 0.001f,
         inverse: Boolean = false
     ): Float {
-        if (preState == 0f || postState == 0f) return 0f // skip inactive
-        val delta = abs(preState) - abs(postState)
-        if (abs(delta) < 0.000001f) return 0f
-        val perfectDelta = 1 / maxRadius
-        val perfectStepsToTarget = ceil(abs(postState) * maxRadius)
-        val discountBonus = 1 - discountLookup[perfectStepsToTarget.toInt().coerceIn(0, discountLookup.lastIndex)]
-        val reward = (delta / perfectDelta).coerceIn(-1f, 1f)
-
-        val valenceOut = (abs(reward) + (discountBonus * 0.5f)) *
-                sign(reward) * scalar *
-                if (inverse) -1f else 1f // sign flip for negative
-
-        if (abs(valenceOut) > 0.1f) contributingStatesCounter++ // Significant enough contribution
+        val delta = (abs(preState) - abs(postState))
+        if (abs(delta) < noiseGate) return 0f
+        val valenceOut = delta * if (inverse) -1f else 1f // sign flip for negative
 
         return valenceOut
     }
 
-    private fun evaluateExploration(postState: Float): Float {
-        if (postState <= 0.35f) return 0f // exploration not relevant
-        val isMovingForward = if (metaData[4] >= 0.03f) 1f else -1f // within 160 degree cone
-        val movementValue = metaData[5] * isMovingForward
-        val valenceOut = movementValue * postState
-        if (abs(valenceOut) > 0.1f) contributingStatesCounter++
+    private fun evaluateDecreaseDistance(
+        preState: Float,
+        postState: Float,
+        inverse: Boolean = false
+    ): Float {
+        if (preState == 0f || postState == 0f) return 0f
+        val delta = (abs(preState) - abs(postState))
+        if (abs(delta) < 0.001f) return 0f
+        val valenceOut = delta * if (inverse) -1f else 1f // sign flip for negative
+
         return valenceOut
     }
 
-    private fun evaluateResourceGain(preValue: Float, postValue: Float, divisor: Float): Float {
-        if (preValue <= 0f) return 0f
-        val normalizedPre = preValue / divisor
-        val normalizedPost = postValue / divisor
-        val relativeGain = normalizedPost / normalizedPre
-        return (relativeGain - 1f).coerceIn(-1f, 1f)
-    }
-
-    fun backpropContribution(valence: Float) {
+    var accuReward = 0f
+    var accuCounter = 0
+    var avgRewMag = 0f
+    fun backpropContribution(valence: Float, bucket: Int = 3) {
         appliedReward = valence
 
-        for (i in 0 until backpropBucket.size) backpropBucket[i] = 0f
+        for (i in 0 until adrenalBucket.size) adrenalBucket[i] = 0f
+        for (i in 0 until adrenalBucket.size) dopaBucket[i] = 0f
+        for (i in 0 until adrenalBucket.size) seroBucket[i] = 0f
         for (i in 0 until intentBucket.size) intentBucket[i] = 0f
 
         // Contribution calculation for pairs
@@ -377,45 +358,159 @@ class Network(
             val isActionPair = outputIsAction[i]
 
             if (isActionPair != actionEvaluation) continue // Not updated this loop
-            val outcome = output[i] - output[i + 1]
-            val axisDirection = sign(outcome)
-            if (axisDirection == 0f) continue
+            val outcome = outputSum[i] - outputSum[i + 1]
+            val globalAxisDirection = sign(outcome)
+            if (globalAxisDirection == 0f) continue
 
             if (isActionPair && outcome <= 0f) continue // Skip latent action pair
 
-            val contributionGate =
+            // Adrenal contribution
+            val adrenalAxisDirection = if (explorationSignal) 1f else sign(adrenalOutput[i] - adrenalOutput[i + 1])
+            val adrenalContribution =
                 if (explorationSignal) {
                     1f // exploratory action, calculateContribution(1) returns 0.05f otherwise - weak learning
-                } else calculateContribution(output[i].coerceIn(0f, 1f), skipGate = true)
+                } else calculateContribution(adrenalOutput[i].coerceIn(0f, 1f), skipGate = true)
 
+            val adrenalContribution2 = calculateContribution(adrenalOutput[i + 1].coerceIn(0f, 1f), skipGate = true)
+            adrenalBucket[i] += appliedReward * adrenalContribution * globalAxisDirection * adrenalAxisDirection
+            adrenalBucket[i + 1] += -appliedReward * adrenalContribution2 * globalAxisDirection * adrenalAxisDirection
 
-            val contributionGate2 = calculateContribution(output[i + 1].coerceIn(0f, 1f), skipGate = true)
+            // Dopaminergic contribution
+            val dopaminAxisDirection = if (explorationSignal) 1f else sign(dopaminergicOutput[i] - dopaminergicOutput[i + 1])
+            val dopaminergicContribution =
+                if (explorationSignal) {
+                    1f
+                } else calculateContribution(dopaminergicOutput[i].coerceIn(0f, 1f), skipGate = true)
 
+            val dopaminergicContribution2 =
+                calculateContribution(dopaminergicOutput[i + 1].coerceIn(0f, 1f), skipGate = true)
+            dopaBucket[i] += appliedReward * dopaminergicContribution * globalAxisDirection * dopaminAxisDirection
+            dopaBucket[i + 1] += -appliedReward * dopaminergicContribution2 * globalAxisDirection * dopaminAxisDirection
 
+            // Serotonergic contribution
+            val serotoninAxisDirection = if (explorationSignal) 1f else sign(serotonergicOutput[i] - serotonergicOutput[i + 1])
+            val serotonergicContribution =
+                if (explorationSignal) {
+                    1f
+                } else calculateContribution(serotonergicOutput[i].coerceIn(0f, 1f), skipGate = true)
 
-            backpropBucket[i] += appliedReward * contributionGate * axisDirection
-            backpropBucket[i + 1] += -appliedReward * contributionGate2 * axisDirection
+            val serotonergicContribution2 =
+                calculateContribution(serotonergicOutput[i + 1].coerceIn(0f, 1f), skipGate = true)
+            seroBucket[i] += appliedReward * serotonergicContribution * globalAxisDirection * serotoninAxisDirection
+            seroBucket[i + 1] += -appliedReward * serotonergicContribution2 * globalAxisDirection * serotoninAxisDirection
 
         }
 
         // Contribution calculation for singles (currently only target preferences)
         for (i in outputNeurons - preferenceNeurons until outputNeurons) {
             if (!actionEvaluation) continue // Evaluate only during action evaluation (targeting)
-            val contribution = calculateContribution(output[i].coerceIn(-1f, 1f))
-            backpropBucket[i] += appliedReward * contribution
+
+            val adrenalContribution = calculateContribution(adrenalOutput[i].coerceIn(-1f, 1f))
+            adrenalBucket[i] += appliedReward * adrenalContribution
+
+            val dopaContribution = calculateContribution(dopaminergicOutput[i].coerceIn(-1f, 1f))
+            dopaBucket[i] += appliedReward * dopaContribution
+
+            val seroContribution = calculateContribution(serotonergicOutput[i].coerceIn(-1f, 1f))
+            seroBucket[i] += appliedReward * seroContribution
         }
 
-        for (i in 0 until backpropContribution.size) backpropContribution[i] += backpropBucket[i]
-
-        for (j in 0 until intentNeurons) {
-            var totalCorrection = 0f
-            for (i in 0 until outputNeurons) {
-                totalCorrection += backpropBucket[i] *
-                        (outputIntentWeights[i][j] + outputIntentMemory[i][j])
+        when (bucket) {
+            0 -> {
+                for (i in 0 until adrenalContribution.size) adrenalContribution[i] += adrenalBucket[i]
+                for (j in 0 until intentNeurons) {
+                    var totalCorrection = 0f
+                    for (i in 0 until outputNeurons) {
+                        totalCorrection += adrenalBucket[i] *
+                                (adrenalOutputWeights[i][j] + adrenalOutputMemory[i][j])
+                    }
+                    intentBucket[j] += totalCorrection *
+                            calculateContribution(intent[j], 0.1f)
+                }
             }
-            intentBucket[j] += totalCorrection *
-                    calculateContribution(intent[j], 0.1f)
+
+            1 -> {
+                for (i in 0 until dopaminergicContribution.size) dopaminergicContribution[i] += dopaBucket[i]
+                for (j in 0 until intentNeurons) {
+                    var totalCorrection = 0f
+                    for (i in 0 until outputNeurons) {
+                        totalCorrection += dopaBucket[i] *
+                                (dopaminergicOutputWeights[i][j] + dopaminergicOutputMemory[i][j])
+                    }
+                    intentBucket[j] += totalCorrection *
+                            calculateContribution(intent[j], 0.1f)
+                }
+            }
+
+            2 -> {
+                for (i in 0 until serotonergicContribution.size) serotonergicContribution[i] += seroBucket[i]
+                for (j in 0 until intentNeurons) {
+                    var totalCorrection = 0f
+                    for (i in 0 until outputNeurons) {
+                        totalCorrection += seroBucket[i] *
+                                (serotonergicOutputWeights[i][j] + serotonergicOutputMemory[i][j])
+                    }
+                    intentBucket[j] += totalCorrection *
+                            calculateContribution(intent[j], 0.1f)
+                }
+            }
+
+            3 -> {
+                for (i in 0 until adrenalContribution.size) {
+                    adrenalContribution[i] += adrenalBucket[i]
+                    dopaminergicContribution[i] += dopaBucket[i]
+                    serotonergicContribution[i] += seroBucket[i]
+                }
+
+                val adrenalContr = adrenalBucket.sum()
+                val dopaContr = dopaBucket.sum()
+                val seroContr = seroBucket.sum()
+
+                val contributionSum = (adrenalContr + dopaContr + seroContr)
+                // Proportional normalization function
+                val localDivisor = if (contributionSum > 1f) contributionSum else 1f
+
+
+                val localAdrContr = adrenalContr / localDivisor
+                val localDopaContr = dopaContr / localDivisor
+                val localSeroContr = seroContr / localDivisor
+
+                for (j in 0 until intentNeurons) {
+                    var totalCorrection = 0f
+                    if (abs(localAdrContr) > 0) {
+                        for (i in 0 until outputNeurons) {
+                            totalCorrection += adrenalBucket[i] *
+                                    (adrenalOutputWeights[i][j] + adrenalOutputMemory[i][j])
+                        }
+                        intentBucket[j] += totalCorrection * localAdrContr *
+                                calculateContribution(intent[j], 0.1f)
+                    }
+                    if (abs(localDopaContr) > 0) {
+                        totalCorrection = 0f
+                        for (i in 0 until outputNeurons) {
+                            totalCorrection += dopaBucket[i] *
+                                    (dopaminergicOutputWeights[i][j] + dopaminergicOutputMemory[i][j])
+                        }
+                        intentBucket[j] += totalCorrection * localDopaContr *
+                                calculateContribution(intent[j], 0.1f)
+                    }
+                    if (abs(localSeroContr) > 0) {
+                        totalCorrection = 0f
+                        for (i in 0 until outputNeurons) {
+                            totalCorrection += seroBucket[i] *
+                                    (serotonergicOutputWeights[i][j] + serotonergicOutputMemory[i][j])
+                        }
+                        intentBucket[j] += totalCorrection * localSeroContr *
+                                calculateContribution(intent[j], 0.1f)
+                    }
+                }
+
+
+            }
+
         }
+
+
 
         for (i in 0 until intentContribution.size) intentContribution[i] += intentBucket[i]
 
@@ -429,16 +524,16 @@ class Network(
                     calculateContribution(activity[j], 0.1f)
         }
 
-        rewCounter++
+        accuCounter++
         accuReward += abs(valence)
-        if (rewCounter > 10) {
-            avgReward = accuReward / rewCounter
-            rewCounter = 0
+        if (accuCounter > 100) {
+            avgRewMag = accuReward / accuCounter
+            accuCounter = 0
             accuReward = 0f
         }
 
-        this.valence = 0f
 
+        this.valence = 0f
     }
 
     var backPropTest = 0f
@@ -450,9 +545,25 @@ class Network(
         for (i in 0 until outputNeurons) {
             for (j in 0 until intentNeurons) {
                 val adaptiveWeightDecay =
-                    adaptiveWeightDecay(outputIntentMemory[i][j], 0.987f, 0.97f)
-                val delta = backpropContribution[i] * intent[j] * learningRate
-                outputIntentMemory[i][j] = (outputIntentMemory[i][j] * adaptiveWeightDecay + delta)
+                    adaptiveWeightDecay(adrenalOutputMemory[i][j], 0.987f, 0.97f)
+                val delta = adrenalContribution[i] * intent[j] * learningRate
+                adrenalOutputMemory[i][j] = (adrenalOutputMemory[i][j] * adaptiveWeightDecay + delta)
+                    .coerceIn(-maxMemory, maxMemory)
+            }
+
+            for (j in 0 until intentNeurons) {
+                val adaptiveWeightDecay =
+                    adaptiveWeightDecay(dopaminergicOutputMemory[i][j], 0.987f, 0.97f)
+                val delta = dopaminergicContribution[i] * intent[j] * learningRate
+                dopaminergicOutputMemory[i][j] = (dopaminergicOutputMemory[i][j] * adaptiveWeightDecay + delta)
+                    .coerceIn(-maxMemory, maxMemory)
+            }
+
+            for (j in 0 until intentNeurons) {
+                val adaptiveWeightDecay =
+                    adaptiveWeightDecay(serotonergicOutputMemory[i][j], 0.987f, 0.97f)
+                val delta = serotonergicContribution[i] * intent[j] * learningRate
+                serotonergicOutputMemory[i][j] = (serotonergicOutputMemory[i][j] * adaptiveWeightDecay + delta)
                     .coerceIn(-maxMemory, maxMemory)
             }
         }
@@ -477,22 +588,17 @@ class Network(
             }
         }
 
-        for (j in 0 until intentNeurons) {
-            for (k in 0 until inputNeurons) {
-                val adaptiveWeightDecay =
-                    adaptiveWeightDecay(intentInputMemory[j][k], 0.9975f, 0.994f)
-                val delta = input[k] * intentContribution[j] * learningRate
-                intentInputMemory[j][k] = (intentInputMemory[j][k] * adaptiveWeightDecay + delta)
-                    .coerceIn(-maxMemory, maxMemory)
-            }
-        }
         backPropTest = 0f
         intentTest = 0f
         activityTest = 0f
         // Post adjustment cleanup
-        for (i in 0 until backpropContribution.size) {
-            backPropTest += abs(backpropContribution[i])
-            backpropContribution[i] = 0f
+        for (i in 0 until adrenalContribution.size) {
+            backPropTest += abs(adrenalContribution[i])
+            backPropTest += abs(dopaminergicContribution[i])
+            backPropTest += abs(serotonergicContribution[i])
+            adrenalContribution[i] = 0f
+            dopaminergicContribution[i] = 0f
+            serotonergicContribution[i] = 0f
         }
         for (i in 0 until intentContribution.size) {
             intentTest += abs(intentContribution[i])
@@ -507,22 +613,6 @@ class Network(
 
 
     // ===================== HELPER FUNCTIONS ===================== \\
-
-    private fun seedIntentReflexes(
-        intentNeuronIndex: Int, inputReflexIndex: Int,
-        value: Float, positive: Boolean = true
-    ) {
-        val reflexValue = if (positive) value else -value
-        intentInputWeights[intentNeuronIndex][inputReflexIndex] = reflexValue
-    }
-
-    private fun seedOutputReflexes(
-        outputNeuronIndex: Int, intentReflexIndex: Int,
-        value: Float, positive: Boolean = true
-    ) {
-        val reflexValue = if (positive) value else -value
-        outputIntentWeights[outputNeuronIndex][intentReflexIndex] = reflexValue
-    }
 
     private fun adaptiveWeightDecay(memoryValue: Float, decay: Float, maxDecay: Float): Float {
         val memory = (abs(memoryValue) / maxMemory).coerceIn(0f, 1f)
@@ -546,8 +636,9 @@ class Network(
     class WeightsPackage(
         val transferInput: Array<FloatArray>,
         val transferIntent: Array<FloatArray>,
-        val transferIntentInput: Array<FloatArray>,
-        val transferOutputIntent: Array<FloatArray>
+        val transferAdrenergic: Array<FloatArray>,
+        val transferDopaminergic: Array<FloatArray>,
+        val transferSerotonergic: Array<FloatArray>
     )
 
 
@@ -571,28 +662,40 @@ class Network(
             }
         }
 
-        val exportIntentInput = Array(intentNeurons) { i ->
-            intentInputWeights[i].copyOf()
-        }
-        for (i in 0 until intentNeurons) {
-            for (j in 0 until inputNeurons) {
-                exportIntentInput[i][j] = (exportIntentInput[i][j] + intentInputMemory[i][j]) / 2
-            }
-        }
 
-        val exportOutputIntent = Array(outputNeurons) { i ->
-            outputIntentWeights[i].copyOf()
+        val exportAdrenergicOutput = Array(outputNeurons) { i ->
+            adrenalOutputWeights[i].copyOf()
         }
 
         for (i in 0 until outputNeurons) {
             for (j in 0 until intentNeurons) {
-                exportOutputIntent[i][j] = (exportOutputIntent[i][j] + outputIntentMemory[i][j]) / 2
+                exportAdrenergicOutput[i][j] = (exportAdrenergicOutput[i][j] + adrenalOutputMemory[i][j]) / 2
+            }
+        }
+
+        val exportDopaminergicOutput = Array(outputNeurons) { i ->
+            dopaminergicOutputWeights[i].copyOf()
+        }
+
+        for (i in 0 until outputNeurons) {
+            for (j in 0 until intentNeurons) {
+                exportDopaminergicOutput[i][j] = (exportDopaminergicOutput[i][j] + dopaminergicOutputMemory[i][j]) / 2
+            }
+        }
+
+        val exportSerotonergicOutput = Array(outputNeurons) { i ->
+            serotonergicOutputWeights[i].copyOf()
+        }
+        for (i in 0 until outputNeurons) {
+            for (j in 0 until intentNeurons) {
+                exportSerotonergicOutput[i][j] = (exportSerotonergicOutput[i][j] + serotonergicOutputMemory[i][j]) / 2
             }
         }
 
         return WeightsPackage(
             exportInput, exportIntent,
-            exportIntentInput, exportOutputIntent
+            exportAdrenergicOutput, exportDopaminergicOutput,
+            exportSerotonergicOutput
         )
     }
 
@@ -611,32 +714,34 @@ class Network(
             }
         }
 
-        val importIntentInput = weightsPackage.transferIntentInput
-        for (i in 0 until intentInputWeights.size) {
-            for (j in 0 until intentInputWeights[i].size) {
-                intentInputWeights[i][j] = importIntentInput[i][j]
+        val importAdrenergic = weightsPackage.transferAdrenergic
+        for (i in 0 until adrenalOutputWeights.size) {
+            for (j in 0 until adrenalOutputWeights[i].size) {
+                adrenalOutputWeights[i][j] = importAdrenergic[i][j]
             }
         }
 
-        val importOutputIntent = weightsPackage.transferOutputIntent
-        for (i in 0 until outputIntentWeights.size) {
-            for (j in 0 until outputIntentWeights[i].size) {
-                outputIntentWeights[i][j] = importOutputIntent[i][j]
+        val importDopaminergic = weightsPackage.transferDopaminergic
+        for (i in 0 until dopaminergicOutputWeights.size) {
+            for (j in 0 until dopaminergicOutputWeights[i].size) {
+                dopaminergicOutputWeights[i][j] = importDopaminergic[i][j]
             }
         }
+
+        val importSerotonergic = weightsPackage.transferSerotonergic
+        for (i in 0 until serotonergicOutputWeights.size) {
+            for (j in 0 until serotonergicOutputWeights[i].size) {
+                serotonergicOutputWeights[i][j] = importSerotonergic[i][j]
+            }
+        }
+
+
         resetMutables()
         seedAllReflexes()
     }
 
     private fun seedAllReflexes() {
-        seedIntentReflexes(
-            THREAT_KILL_INTENT_INDEX,
-            THREATENED_INDEX, 1f
-        )
-        seedOutputReflexes(
-            KILL_ACTION_INDEX,
-            THREAT_KILL_INTENT_INDEX, 1f
-        )
+
     }
 
     private fun resetMutables() {
@@ -651,14 +756,19 @@ class Network(
                 memoryIntent[i][j] = 0f
             }
         }
-        for (i in 0 until intentInputMemory.size) {
-            for (j in 0 until intentInputMemory[i].size) {
-                intentInputMemory[i][j] = 0f
+        for (i in 0 until adrenalOutputMemory.size) {
+            for (j in 0 until adrenalOutputMemory[i].size) {
+                adrenalOutputMemory[i][j] = 0f
             }
         }
-        for (i in 0 until outputIntentMemory.size) {
-            for (j in 0 until outputIntentMemory[i].size) {
-                outputIntentMemory[i][j] = 0f
+        for (i in 0 until dopaminergicOutputMemory.size) {
+            for (j in 0 until dopaminergicOutputMemory[i].size) {
+                dopaminergicOutputMemory[i][j] = 0f
+            }
+        }
+        for (i in 0 until serotonergicOutputMemory.size) {
+            for (j in 0 until serotonergicOutputMemory[i].size) {
+                serotonergicOutputMemory[i][j] = 0f
             }
         }
 
@@ -711,40 +821,38 @@ class Network(
             }
             block.append("Intent[${i}]: ${intent[i]}\n")
         }
-        block.append("===== Intent Input Neurons: =====\n")
-        for (i in 0 until intentNeurons) {
-            for (j in 0 until inputNeurons) {
-                block.append("IntentInput[${i}][${j}]")
-                block.append(" Fixed: ${intentInputWeights[i][j]}")
-                block.append("   Adapt: ${intentInputMemory[i][j]}\n")
-            }
-            block.append("Intent[${i}]: ${interactionIntent[i]}\n")
-        }
-        block.append("===== OutputIntent Neurons: =====\n")
+        block.append("===== Ternary Neurons: =====\n")
         for (i in 0 until outputNeurons) {
             for (j in 0 until intentNeurons) {
-                block.append("OutputIntent [${i}][${j}]")
-                block.append(" Fixed: ${outputIntentWeights[i][j]}")
-                block.append("   Adapt: ${outputIntentMemory[i][j]}\n")
+                block.append("Adrenal [${i}][${j}]")
+                block.append(" Fixed: ${adrenalOutputWeights[i][j]}")
+                block.append("   Adapt: ${adrenalOutputMemory[i][j]}\n")
+                block.append("Dopaminergic [${i}][${j}]")
+                block.append(" Fixed: ${dopaminergicOutputWeights[i][j]}")
+                block.append("   Adapt: ${dopaminergicOutputMemory[i][j]}\n")
+                block.append("Serotonergic [${i}][${j}]")
+                block.append(" Fixed: ${serotonergicOutputWeights[i][j]}")
+                block.append("   Adapt: ${serotonergicOutputMemory[i][j]}\n")
             }
         }
-        block.append("===== Output Neurons: =====\n")
+        block.append("===== Output Summary: =====\n")
         for (i in 0 until outputNeurons) {
-            block.append("Output[${i}]: ${output[i]}\n")
+            block.append("Output[${i}]: ${outputSum[i]}\n")
         }
         block.append("===== Action: =====\n")
 
-        block.append("X-Axis: ${output[0] - output[1]}\n")
-        block.append("Y-Axis: ${output[2] - output[3]}\n")
-        block.append("Kill: ${output[4] - output[5]}\n")
-        block.append("Mate: ${output[6] - output[7]}\n")
-        block.append("Work: ${output[8] - output[9]}\n")
-        block.append("Eat: ${output[10] - output[11]}\n")
+        block.append("X-axis: ${outputSum[0] - outputSum[1]}\n")
+        block.append("Y-axis: ${outputSum[2] - outputSum[3]}\n")
+        block.append("Kill: ${outputSum[4] - outputSum[5]}\n")
+        block.append("Mate: ${outputSum[6] - outputSum[7]}\n")
+        block.append("Eat: ${outputSum[8] - outputSum[9]}\n")
 
 
         block.append("===== Accessories: =====\n")
-        block.append("EFFECTIVE REWARD: $appliedReward \n")
-        block.append("AVG REWARD MAG: $avgReward \n")
+        block.append("AVG REWARD MAG (100 ticks): $avgRewMag \n")
+        block.append("ADR REWARD MAG: $adrMagMulti \n")
+        block.append("DOP REWARD MAG: $dopMagMulti \n")
+        block.append("SER REWARD MAG: $serMagMulti \n")
         block.append("===== END =====\n")
         return block.toString()
     }

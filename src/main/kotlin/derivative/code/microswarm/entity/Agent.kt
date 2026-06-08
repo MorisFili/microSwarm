@@ -36,12 +36,16 @@ open class Agent(
     var TARGET: Agent? = null
     var bestTargetScore = 0f
     val targetedBy = arrayOfNulls<Agent>(20)
-    var resourceField: Resource? = null
+    var foodField: Food? = null
+    var foodFieldDistance = 1f
     var MATE_CONDITION = false
+    var INCUBATING = false
+    var INCUBATION_TIMER = 0f
+    var INCUBATION_MATERIAL: GeneticMaterial? = null
     val preState = FloatArray(network.inputStates)
     val postState = FloatArray(network.inputStates)
-    var facingX = 0f
-    var facingY = 0f
+    var facingX = 1f
+    var facingY = 1f
     var oldFacingX = 0f
     var oldFacingY = 0f
     var distMoved = 0f
@@ -52,23 +56,17 @@ open class Agent(
     // Social features
     var AGENTS_PRESENCE_COUNT = 0
     var ENTITIES_PRESENCE_COUNT = 0
-    var CREDIT = 10f
     var REPUTATION = 1f
     var KILL_COUNT = 0f
-
-    // Economy calculations
-    val reproductionCost = 20
     var targetCooldown = 0
-    val creditHorizonMultiplier = 10f // How many actions the state should care about
-    var creditDenominator = reproductionCost * creditHorizonMultiplier
 
     // Genetic traits
-    var sex = false
-    var apathic = false
+    var isMale = false // true = male
+    var isApathic = false
 
     fun randomizeTraits() {
-        sex = Random.nextFloat() < 0.5
-        apathic = Random.nextFloat() < 0.1
+        isMale = Random.nextFloat() < 0.5
+        isApathic = Random.nextFloat() < 0.1
     }
 
     init {
@@ -80,6 +78,7 @@ open class Agent(
         if (targetCooldown > 0) {
             targetCooldown--
         }
+        if (INCUBATION_TIMER > 0f) INCUBATION_TIMER--
         updateProximity()
         generateState(preState)
     }
@@ -90,11 +89,16 @@ open class Agent(
     }
 
     fun syncPerformAction() {
-        action(output[2], output[3], output[4], output[5])
+        action(output[2], output[3], output[4])
+        if (INCUBATING && INCUBATION_TIMER < 1f) {
+            if (INCUBATION_MATERIAL != null) MATE_CONDITION = true
+            INCUBATING = false
+            INCUBATION_TIMER = 0f
+            network.valence += 1f
+        }
     }
 
     fun asyncActionEvaluation() {
-        generateMetaData()
         network.actionEvaluation()
     }
 
@@ -106,7 +110,7 @@ open class Agent(
         generateState(postState)
         network.stateEvaluation(preState, postState)
         network.weightAdjustment()
-        ENERGY -= 0.02f
+        ENERGY -= if (INCUBATING) 0.02f else 0.01f
         if (ENERGY <= 0f) starvation()
     }
 
@@ -115,10 +119,9 @@ open class Agent(
         if (targetCooldown > 0) return
 
         // outputs 12..n -> preferences
-        val huePref = output[6].coerceIn(-1f, 1f) // +1 -> same hue, -1 -> other hue
-        val sexPref = output[7].coerceIn(-1f, 1f) // +1 -> other sex, -1 -> same sex
-        val reputationPref = output[8].coerceIn(-1f, 1f) // +1 -> good rep, -1 -> bad rep
-        val wealthPref = output[9].coerceIn(0f, 1f) // 0 -> 1
+        val huePref = output[5].coerceIn(-1f, 1f) // +1 -> same hue, -1 -> other hue
+        val sexPref = output[6].coerceIn(-1f, 1f) // +1 -> other sex, -1 -> same sex
+        val reputationPref = output[7].coerceIn(-1f, 1f) // +1 -> good rep, -1 -> bad rep
 
         // ========= Targeted By Block =========
         var acuteScore = 0f
@@ -141,11 +144,10 @@ open class Agent(
             if (lineOfSightCheck(agent)) {
 
                 val hueScore = if (agent.hue == this.hue) huePref else -huePref
-                val sexScore = if (agent.sex != this.sex) sexPref else -sexPref
+                val sexScore = if (agent.isMale != this.isMale) sexPref else -sexPref
                 val reputationScore = if (agent.REPUTATION >= 0.5f) reputationPref else -reputationPref
-                val wealthScore = if (CREDIT > 0) wealthPref * (((CREDIT + agent.CREDIT) / CREDIT) - 1f) else wealthPref
 
-                val agentScore = hueScore + sexScore + reputationScore + wealthScore
+                val agentScore = hueScore + sexScore + reputationScore
 
                 if (agentScore > bestScore) {
                     bestScore = agentScore
@@ -194,12 +196,10 @@ open class Agent(
         var familiarX = 0f
         var familiarY = 0f
         var familiarCount = 0f
-        var familiarStrength = 0f
 
         var unFamiliarX = 0f
         var unFamiliarY = 0f
         var unFamiliarCount = 0f
-        var unFamiliarStrength = 0f
 
         var dangerX = 0f
         var dangerY = 0f
@@ -217,12 +217,10 @@ open class Agent(
 
             if (agent.hue == hue) { // Same hue
                 familiarCount++
-                familiarStrength += agent.CREDIT * normDistFactor
                 familiarX += dx
                 familiarY += dy
             } else { // Other hue count
                 unFamiliarCount++
-                unFamiliarStrength += agent.CREDIT * normDistFactor
                 unFamiliarX += dx
                 unFamiliarY += dy
             }
@@ -240,33 +238,36 @@ open class Agent(
         withinActionRadius = actionRadiusCheck(TARGET)
 
         // Local resource analysis logic
-        var resourceValue = 0f
-        var resourceDecaySpeed = 0f
-        var closestResource: Resource? = null
-        var closestDistSqResource = 1000f
+        var foodValue = 0f
+        var closestFood: Food? = null
+        var closestDistSqFood = 1000f
         for (entity in entitiesInProximity) { // Non-agent entity array
-            if (entity is Resource) {
+            if (entity is Food) {
                 if (!entity.enabled) continue
                 val dx = entity.x - x
                 val dy = entity.y - y
                 val distSq = dx * dx + dy * dy
-                resourceValue += entity.value
-                resourceDecaySpeed += entity.decaySpeed
-                if (distSq < closestDistSqResource) {
-                    closestDistSqResource = distSq
-                    closestResource = entity
+                val prox = (1f - distSq / maxRadiusSq).coerceIn(0f, 1f)
+                val ripeness = (entity.value / 25f).coerceIn(0f, 1f)
+                val availability = (1f + entity.decaySpeed).coerceIn(0f, 1f)
+                foodValue += prox * ripeness * availability
+
+                if (distSq < closestDistSqFood) {
+                    closestDistSqFood = distSq
+                    closestFood = entity
                 }
             }
         }
         // Crude gate that checks both for proximity and availability
-        resourceField = if (closestResource != null && closestDistSqResource < 100f) closestResource else null
+        foodField = if (closestFood != null && closestDistSqFood < 100f) closestFood else null
+        foodFieldDistance = if (closestFood != null) closestDistSqFood / (maxRadiusSq) else 1f
 
         // ========= Coordination Block =========
         // Familiar Group
-        val familiarCenterDX =
-            if (familiarCount > 0) (familiarX / familiarCount) / detectionRadius else 0f
-        val familiarCenterDY =
-            if (familiarCount > 0) (familiarY / familiarCount) / detectionRadius else 0f
+        val famAvgDX = if (familiarCount > 0) (familiarX / familiarCount) / detectionRadius else 0f
+        val famAvgDY = if (familiarCount > 0) (familiarY / familiarCount) / detectionRadius else 0f
+        val familiarCenterX = famAvgDX * -facingY + famAvgDY * facingX
+        val familiarCenterY = famAvgDX * facingX + famAvgDY * facingY
         val familiarGroupSize = familiarCount / GROUP_SIZE
         val familiarDistance = if (familiarCount > 0) {
             val avgDX = familiarX / familiarCount
@@ -276,10 +277,10 @@ open class Agent(
         } else 0f
 
         // Unfamiliar Group
-        val unFamiliarCenterDX =
-            if (unFamiliarCount > 0) (unFamiliarX / unFamiliarCount) / detectionRadius else 0f
-        val unFamiliarCenterDY =
-            if (unFamiliarCount > 0) (unFamiliarY / unFamiliarCount) / detectionRadius else 0f
+        val unFamAvgDX = if (unFamiliarCount > 0) (unFamiliarX / unFamiliarCount) / detectionRadius else 0f
+        val unFamAvgDY = if (unFamiliarCount > 0) (unFamiliarY / unFamiliarCount) / detectionRadius else 0f
+        val unFamiliarCenterX = unFamAvgDX * -facingY + unFamAvgDY * facingX
+        val unFamiliarCenterY = unFamAvgDX * facingX + unFamAvgDY * facingY
         val unFamiliarGroupSize = unFamiliarCount / GROUP_SIZE
         val unFamiliarThreat = if (unFamiliarCount > 0) {
             val avgDX = unFamiliarX / unFamiliarCount
@@ -289,10 +290,10 @@ open class Agent(
         } else 0f
 
         // Center of danger
-        val dangerCenterDX =
-            if (dangerCount > 0) (dangerX / dangerCount) / detectionRadius else 0f
-        val dangerCenterDY =
-            if (dangerCount > 0) (dangerY / dangerCount) / detectionRadius else 0f
+        val dangerAvgDX = if (dangerCount > 0) (dangerX / dangerCount) / detectionRadius else 0f
+        val dangerAvgDY = if (dangerCount > 0) (dangerY / dangerCount) / detectionRadius else 0f
+        val dangerCenterX = dangerAvgDX * -facingY + dangerAvgDY * facingX
+        val dangerCenterY = dangerAvgDX * facingX + dangerAvgDY * facingY
         val dangerCenterStrength =
             if (dangerCount > 0) (localDangerValue / dangerCount) else 0f
         val dangerCenterThreat = if (dangerCount > 0) {
@@ -305,47 +306,76 @@ open class Agent(
         // Target
         val targetDX = if (target != null) (target.x - x) / targetRadius else 0f
         val targetDY = if (target != null) (target.y - y) / targetRadius else 0f
+        val targetX = targetDX * -facingY + targetDY * facingX
+        val targetY = targetDX * facingX + targetDY * facingY
         val targetDistance = if (target != null) cheapDistance(this, target) / targetRadius else 0f
-        val targetAssessment = target?.let {
-            val bad = it.KILL_COUNT
-            val good = if (it.sex != sex) 1f else 0f +
-                    if (it.hue == hue && it.REPUTATION > 0.5f) 1f else 0f +
-                            if (CREDIT > 0f) 1 - ((it.CREDIT + CREDIT) / CREDIT) else 0f
-            good - bad
-        } ?: 0f
+
+        val attractiveness = if (target != null) {
+            val sexCompat   = if (target.isMale != isMale) 1f else 0f
+            val repQuality  = target.REPUTATION.coerceIn(0f, 1f)
+            val health      = (target.ENERGY / target.MAX_ENERGY).coerceIn(0f, 1f)
+            val available   = if (!target.INCUBATING) 1f else 0f
+            sexCompat * 0.5f + repQuality * 0.25f + health * 0.15f + available * 0.1f
+        } else 0f
+
+        val threat = if (target != null) {
+            val dangerScore = (target.KILL_COUNT / (1f + target.KILL_COUNT)) *
+                    (1f - target.REPUTATION).coerceIn(0f, 1f)
+            val apathic     = if (target.isApathic) 0.3f else 0f
+            val huntingMe   = if (targetedBy.any { it === target }) 1f else 0f
+            (dangerScore * 0.5f + apathic * 0.2f + huntingMe * 0.3f).coerceIn(0f, 1f)
+        } else 0f
+
+        val targetEval  = (attractiveness - threat).coerceIn(-1f, 1f)
 
         // Resources
-        val resourceDX = if (closestResource != null) closestResource.x / detectionRadius else 0f
-        val resourceDY = if (closestResource != null) closestResource.y / detectionRadius else 0f
-        val resourceDistance = if (closestResource != null)
-            cheapDistance(this, closestResource) / detectionRadius else 0f
+        val resourceDX = if (closestFood != null) (closestFood.x - x) / detectionRadius else 0f
+        val resourceDY = if (closestFood != null) (closestFood.y - y) / detectionRadius else 0f
+        val resourceX = resourceDX * -facingY + resourceDY * facingX
+        val resourceY = resourceDX * facingX + resourceDY * facingY
+        val resourceDistance = if (closestFood != null)
+            cheapDistance(this, closestFood) / detectionRadius else 0f
 
         // Environmental
+        val incubationMultiplier = if (INCUBATING) 2f else 1f
+        val competitors = (familiarCount + unFamiliarCount) / GROUP_SIZE
+        val resourceDensity = foodValue / (1f + competitors)
+
+        val hunger = (1 - (ENERGY / MAX_ENERGY)).coerceIn(0f, 1f)
+        val explorationPressure = (
+                (1f - resourceDensity.coerceIn(0f, 1f)) * 0.75f +
+                        (1f - familiarGroupSize.coerceIn(0f, 1f)) * 0.25f) *
+                (1f - (dangerCenterThreat + unFamiliarThreat).coerceIn(0f, 1f))
         val immediateThreat = acuteScore.coerceIn(0f, 1f)
         val crowdingState = (((familiarCount + unFamiliarCount) - GROUP_SIZE) / GROUP_SIZE)
-        val threatState = (dangerCenterStrength * dangerCenterThreat) + immediateThreat
+        val threatState = ((dangerCenterStrength * dangerCenterThreat) + immediateThreat).coerceIn(0f, 1f)
         val discomfortState = unFamiliarGroupSize * unFamiliarThreat
-        val safetyScore = (1 - familiarDistance) * familiarGroupSize
-        // total area value divided by population per second multiplied by a decay factor
-        // 2 agents per fresh resource = 1f before decay factor
-        val resourceDensity = ((resourceValue / (familiarCount + unFamiliarCount + 1)) / 50) * (1 + resourceDecaySpeed)
-        val hunger = 1 - (ENERGY / MAX_ENERGY)
+        val safetyScore = max(
+            ((1f - familiarDistance) * familiarGroupSize) - (unFamiliarThreat * unFamiliarGroupSize), // social safety
+            (1f - threatState) * (1f - explorationPressure)
+        )  // environmental safety
+
 
         // Main signal evaluation
         val adrenaline = // Urgency/Intensity signal
             (threatState.coerceIn(0f, 1f) * (1 - safetyScore.coerceIn(0f, 1f))) +
                     (discomfortState.coerceIn(0f, 1f) * (1 - safetyScore.coerceIn(0f, 1f))) +
-                    (acuteScore * 1 - safetyScore.coerceIn(0f, 1f)) +
-                    hunger * (1f - safetyScore.coerceIn(0f, 1f))
-        val dopamine = // Appetite/Desire/Opportunity signal
-            (1f - (CREDIT / creditDenominator).coerceIn(0f, 1f)) *
-                    (targetAssessment + resourceDensity.coerceIn(0f, 1f)) +
-                    hunger * resourceDensity.coerceIn(0f, 1f)
+                    (crowdingState.coerceIn(0f, 1f) * (1f - resourceDensity.coerceIn(0f, 1f))) +
+                    immediateThreat * incubationMultiplier + // Immediate threat, no scalar
+                    hunger * (1f - resourceDensity.coerceIn(0f, 1f)) + // Hunger with no food around
+                    (-targetEval).coerceAtLeast(0f) * (1f - targetDistance)
+
+        val dopamine = // Appetite/Desire signal
+            targetEval.coerceAtLeast(0f) * (1 - targetDistance) +
+                    hunger * resourceDensity.coerceIn(0f, 1f) + // Hunger * resource abundance
+                    explorationPressure.coerceIn(0f, 1f) * (1f - resourceDensity.coerceIn(0f, 1f)) +
+                    familiarGroupSize * (1f - familiarDistance) * 0.5f * incubationMultiplier
         val serotonin = // Satisfaction/Content signal
-            safetyScore.coerceIn(0f, 1f) *
-                    (CREDIT / creditDenominator).coerceIn(0f, 1f) *
-                    (1f - abs(crowdingState)) *
-                    (1f - hunger)
+            safetyScore.coerceIn(0f, 1f) * 0.35f +
+                    (1f - hunger).coerceIn(0f, 1f) * 0.35f +
+                    resourceDensity.coerceIn(0f, 1f) * 0.20f +
+                    REPUTATION.coerceIn(0f, 1f) * 0.10f
+
 
         val sum = adrenaline + dopamine + serotonin
 
@@ -353,52 +383,47 @@ open class Agent(
         val dopNorm = if (sum > 1f) dopamine / sum else dopamine
         val serNorm = if (sum > 1f) serotonin / sum else serotonin
 
-        // Exploration
-        val explorationPressure = (
-                (1f - resourceDensity.coerceIn(0f, 1f)) * 0.65f +
-                        (1f - familiarGroupSize.coerceIn(0f, 1f)) * 0.35f) *
-                (1f - (dangerCenterThreat + unFamiliarThreat).coerceIn(0f, 1f))
-
 
         // ========= State Assignment Block =========
-        // Main Signals - not evaluated
+        // Main Signals
         state[0] = adrNorm.coerceIn(0f, 1f)
         state[1] = dopNorm.coerceIn(0f, 1f)
         state[2] = serNorm.coerceIn(0f, 1f)
         // same hue group coordination
-        state[3] = familiarCenterDX.coerceIn(-1f, 1f)
-        state[4] = familiarCenterDY.coerceIn(-1f, 1f)
+        state[3] = familiarCenterX.coerceIn(-1f, 1f)
+        state[4] = familiarCenterY.coerceIn(-1f, 1f)
         state[5] = familiarDistance.coerceIn(0f, 1f)
         state[6] = familiarGroupSize.coerceIn(0f, 1f)
         // other hue group coordination
-        state[7] = unFamiliarCenterDX.coerceIn(-1f, 1f)
-        state[8] = unFamiliarCenterDY.coerceIn(-1f, 1f)
+        state[7] = unFamiliarCenterX.coerceIn(-1f, 1f)
+        state[8] = unFamiliarCenterY.coerceIn(-1f, 1f)
         state[9] = unFamiliarThreat.coerceIn(0f, 1f)
         state[10] = unFamiliarGroupSize.coerceIn(0f, 1f)
         // renegade group coordination
-        state[11] = dangerCenterDX.coerceIn(-1f, 1f)
-        state[12] = dangerCenterDY.coerceIn(-1f, 1f)
+        state[11] = dangerCenterX.coerceIn(-1f, 1f)
+        state[12] = dangerCenterY.coerceIn(-1f, 1f)
         state[13] = dangerCenterThreat.coerceIn(0f, 1f)
         state[14] = dangerCenterStrength.coerceIn(0f, 1f)
         // resource coordination
-        state[15] = resourceDX.coerceIn(-1f, 1f)
-        state[16] = resourceDY.coerceIn(-1f, 1f)
+        state[15] = resourceX.coerceIn(-1f, 1f)
+        state[16] = resourceY.coerceIn(-1f, 1f)
         state[17] = resourceDistance.coerceIn(0f, 1f)
         // target coordination
-        state[18] = targetDX.coerceIn(-1f, 1f)
-        state[19] = targetDY.coerceIn(-1f, 1f)
+        state[18] = targetX.coerceIn(-1f, 1f)
+        state[19] = targetY.coerceIn(-1f, 1f)
         state[20] = targetDistance.coerceIn(0f, 1f)
-        state[21] = targetAssessment.coerceIn(-1f, 1f)
         // target preference
         state[22] = if (target == null) 0f else if (target.hue == hue) 1f else -1f
-        state[23] = if (target == null) 0f else if (target.sex != sex) 1f else -1f
+        state[23] = if (target == null) 0f else if (target.isMale != isMale) 1f else -1f
         state[24] = if (target == null) 0f else if (target.REPUTATION < 0.5f) 1f else 0f
-        state[25] = if (target == null) 0f else (target.CREDIT / creditDenominator).coerceIn(0f, 1f)
+        state[25] = if (target == null) 0f else if (target.INCUBATING) -1f else 1f
         // global environmental && self
+        state[21] = facingX.coerceIn(-1f, 1f)
+        state[36] = facingY.coerceIn(-1f, 1f)
         state[26] = if (withinActionRadius) 1f else 0f
         state[27] = crowdingState.coerceIn(-1f, 1f)
-        state[28] = threatState.coerceIn(0f, 1f)
-        state[29] = (CREDIT / creditDenominator).coerceIn(0f, 1f)
+        state[28] = threatState.coerceIn(-1f, 1f)
+        state[29] = if (INCUBATING) 1f else 0f
         state[30] = REPUTATION.coerceIn(0f, 1f)
         state[31] = safetyScore.coerceIn(0f, 1f)
         state[32] = resourceDensity.coerceIn(0f, 1f)
@@ -406,17 +431,6 @@ open class Agent(
         state[34] = hunger.coerceIn(0f, 1f)
         state[35] = discomfortState.coerceIn(0f, 1f)
 
-        // Metadata
-        network.metaData[0] = CREDIT // Pre action value
-        network.metaData[5] = distMoved // post steps moved
-        network.metaData[4] = getDotProductValue() // new directional value
-
-    }
-
-    private fun generateMetaData() {
-        if (CREDIT > creditDenominator) creditDenominator = CREDIT
-        network.metaData[1] = CREDIT // Post action value
-        network.metaData[2] = creditDenominator
     }
 
     private fun cheapDistance(a: Agent, b: Entity): Float {
@@ -431,7 +445,7 @@ open class Agent(
     }
 
     private fun cheapDistance(dx: Float, dy: Float): Float {
-        // Average distance in x and y-axis as inputs
+        // Rough Euclidean approximation using voodoo
         val ax = abs(dx)
         val ay = abs(dy)
 
@@ -441,42 +455,36 @@ open class Agent(
         return 0.96043384f * maxD + 0.39782473f * minD
     }
 
-    private fun action(kill: Float, mate: Float, work: Float, eat: Float) {
+    private fun action(kill: Float, mate: Float, eat: Float) {
 
-        val choice = maxOf(kill, mate, work, eat)
+        val choice = maxOf(kill, mate, eat)
         if (choice > network.ACTION_THRESHOLD) {
             when (choice) {
 
                 eat -> {
-                    if (CREDIT > 0) {
-                        if (network.explorationSignal) {
-                            network.valence += (1f - (ENERGY / MAX_ENERGY))
-                            return
+                    val energyRatio = ENERGY / MAX_ENERGY
+                    if (network.explorationSignal) {
+                        network.valence += if (energyRatio <= 1f) {
+                            (1f - energyRatio).coerceAtLeast(0.5f) * (1 - foodFieldDistance)
+                        } else {
+                            -(energyRatio - 1f) * 0.3f  // slight punishment for overeating, scaled down
                         }
-                        if (ENERGY < 90f) {
-                            CREDIT--
-                            ENERGY += 10f
-                            network.valence += (1f - (ENERGY / MAX_ENERGY))
-                        }
-
-                    }
-                }
-
-
-                work -> {
-                    if (resourceField != null) {
-
-                        if (network.explorationSignal) {
-                            network.valence += (1f - (CREDIT / 200).coerceIn(0f, 0.9f))
-                            return
-                        }
-
-                        val resource = resourceField ?: return
-                        val creditGained = 1f
-                        CREDIT += creditGained
-                        resource.value -= creditGained
                         return
                     }
+
+                    val food = foodField ?: return
+
+                    ENERGY += 10f
+                    food.value--
+
+                    val valence = if (energyRatio <= 1f) {
+                        (1f - energyRatio).coerceAtLeast(0.5f) * (1 - foodFieldDistance)
+                    } else {
+                        -(energyRatio - 1f) * 0.3f  // slight punishment for overeating, scaled down
+                    }
+                    network.valence += valence
+
+
                 }
 
                 else -> {
@@ -492,26 +500,38 @@ open class Agent(
                         mate -> {
 
                             if (network.explorationSignal) {
-                                if (withinActionRadius) {
-                                    network.valence += 0.25f
-                                    if (sex != target.sex) {
-                                        network.valence += 0.25f
-                                        if (CREDIT >= reproductionCost) {
-                                            network.valence += 0.25f
-                                        } else network.valence -= 0.25f
-                                    } else network.valence -= 0.25f
+                                if (withinActionRadius && isMale != target.isMale) {
+                                    network.valence += 1.0f
                                 } else network.valence -= 0.25f
                                 return
                             }
 
                             Main.spawnAttempts.incrementAndGet()
-                            if (withinActionRadius && sex != target.sex && CREDIT >= reproductionCost) {
-                                MATE_CONDITION = true
-                                CREDIT -= reproductionCost
+                            if (withinActionRadius && isMale != target.isMale) {
+                                if (isMale) { // is male
+                                    if (!target.INCUBATING) {
+                                        target.INCUBATING = true
+                                        if (hue == target.hue) Main.spawnedWithOwnHue.incrementAndGet()
+                                        else Main.spawnedWithOtherHue.incrementAndGet()
+                                        target.INCUBATION_TIMER = 200f
+                                        target.INCUBATION_MATERIAL =
+                                            GeneticMaterial(network.extractWeightsForReproduction(), hue!!, isApathic)
+                                    } else network.valence -= 0.2f
+                                } else if (!INCUBATING) {
+                                    INCUBATING = true
+                                    if (hue == target.hue) Main.spawnedWithOwnHue.incrementAndGet()
+                                    else Main.spawnedWithOtherHue.incrementAndGet()
+                                    INCUBATION_TIMER = 200f
+                                    INCUBATION_MATERIAL =
+                                        GeneticMaterial(
+                                            target.network.extractWeightsForReproduction(),
+                                            hue!!,
+                                            target.isApathic
+                                        )
+                                } else network.valence -= 0.2f
+                                ENERGY -= 5f
                                 targetCooldown = 50
                                 network.valence += 1f
-                                if (hue == target.hue) Main.spawnedWithOwnHue.incrementAndGet()
-                                else Main.spawnedWithOtherHue.incrementAndGet()
                                 return
                             } else network.valence -= 0.2f
                             targetCooldown = 10
@@ -522,8 +542,7 @@ open class Agent(
 
                             if (network.explorationSignal) {
                                 if (withinActionRadius) {
-                                    network.valence += if (CREDIT > 0) (((CREDIT + target.CREDIT) / CREDIT) - 1f) else 0f
-                                    if (!apathic) network.valence -= 1f // remorse
+                                    if (!isApathic) network.valence -= 1f // remorse
                                     if (target.REPUTATION < 0.5f) network.valence += 1f - (target.REPUTATION * 2f)
                                 } else network.valence -= 0.2f
                                 return
@@ -536,13 +555,11 @@ open class Agent(
                                 } else {
                                     Main.killedOtherHue.incrementAndGet()
                                 }
-                                CREDIT += target.CREDIT
-                                target.CREDIT = 0f
                                 kill(target)
                                 clearTarget()
                                 targetCooldown = 50
                                 if (target.REPUTATION < 0.5f) network.valence += 1f - (target.REPUTATION * 2f)
-                                if (!apathic) network.valence -= 1f // remorse
+                                if (!isApathic) network.valence -= 1f // remorse
                                 REPUTATION -= target.REPUTATION * 0.5f
                                 return
                             } else network.valence -= 0.2f
@@ -554,9 +571,11 @@ open class Agent(
         }
     }
 
-    private fun move(nx: Float, ny: Float) {
-        var newX = x + nx
-        var newY = y + ny
+    private fun move(moveX: Float, moveY: Float) {
+        if (abs(moveX) + abs(moveY) < 0.0001f) return
+
+        var newX = x + moveX
+        var newY = y + moveY
 
         if (newX >= 999.99f) newX -= 999.99f
         if (newX < 0f) newX += 999.99f
@@ -570,28 +589,39 @@ open class Agent(
         // Occupancy check
         val gridX = newX.toInt()
         val gridY = newY.toInt()
-        Simulation.occupancyGrid[x.toInt()][y.toInt()] = false // clear old occupancy
+        val oldGridX = x.toInt()
+        val oldGridY = y.toInt()
+        Simulation.occupancyGrid[oldGridX][oldGridY] = false // clear old occupancy
 
         if (Simulation.occupancyGrid[gridX][gridY]) { // If new position is occupied
             // Try X
-            if (!Simulation.occupancyGrid[gridX][y.toInt()]) {
-                facingX = newX - x
-                distMoved += abs(facingX)
+            if (!Simulation.occupancyGrid[gridX][oldGridY]) {
+                distMoved += abs(moveX)
                 x = newX
             }
             // Try Y
-            if (!Simulation.occupancyGrid[x.toInt()][gridY]) {
-                facingY = newY - y
-                distMoved += abs(facingY)
+            if (!Simulation.occupancyGrid[oldGridX][gridY]) {
+                distMoved += abs(moveY)
                 y = newY
             }
         } else {
-            facingX = newX - x
-            facingY = newY - y
-            distMoved += abs(facingX)
-            distMoved += abs(facingY)
+            distMoved += abs(moveX)
+            distMoved += abs(moveY)
             x = newX
             y = newY
+        }
+        // facing normalization voodoo code to keep facingX + facingY =~1f
+        val len = cheapDistance(moveX, moveY)
+        if (len > 0.000001f) {
+            val targetFX = moveX / len
+            val targetFY = moveY / len
+            val newFX = facingX + (targetFX - facingX) * 0.5f
+            val newFY = facingY + (targetFY - facingY) * 0.5f
+            val newLen = cheapDistance(newFX, newFY) // renormalization of the new facing
+            if (newLen > 0.000001f) {
+                facingX = newFX / newLen
+                facingY = newFY / newLen
+            }
         }
         Simulation.occupancyGrid[x.toInt()][y.toInt()] = true
 
@@ -701,17 +731,20 @@ open class Agent(
 
     fun resetState() {
         ENERGY = 100f
-        CREDIT = 10f
         enabled = true
         TARGET = null
         MATE_CONDITION = false
         withinActionRadius = false
+        INCUBATING = false
+        INCUBATION_MATERIAL = null
+        INCUBATION_TIMER = 0f
         targetCooldown = 0
     }
 
     private fun updateProximity() {
 
         Arrays.fill(agentsInProximity, null)
+        Arrays.fill(entitiesInProximity, null)
         AGENTS_PRESENCE_COUNT = 0
         ENTITIES_PRESENCE_COUNT = 0
 
@@ -741,7 +774,7 @@ open class Agent(
                             }
                         }
                         if (ENTITIES_PRESENCE_COUNT < 5) {
-                            if (other is Resource) {
+                            if (other is Food) {
                                 entitiesInProximity[ENTITIES_PRESENCE_COUNT] = other
                                 ENTITIES_PRESENCE_COUNT++
                             }

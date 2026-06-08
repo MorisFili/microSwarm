@@ -2,14 +2,16 @@ package derivative.code.microswarm.entity
 
 import javafx.scene.paint.Color
 
-class Resource(
+class Food(
     id: Int,
     x: Float,
     y: Float,
     enabled: Boolean = true
 ) : Entity(id, x, y, Color.GREEN, enabled) {
 
-    var value = 100f
+
+    val MAX_VALUE = 100f
+    var value = MAX_VALUE
     var decaySpeed = 0f
     var REGEN_PER_TICK = 1f
     private var REGEN_PER_SECOND = REGEN_PER_TICK * 50f
