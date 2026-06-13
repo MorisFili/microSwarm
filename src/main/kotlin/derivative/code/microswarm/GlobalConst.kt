@@ -16,60 +16,12 @@ fun managePopHueCounter(hue: Color?, increment: Boolean = true) {
     }
 }
 
-val discountLookup = floatArrayOf(
-    1.000000f, // 0 steps
-    0.950000f,
-    0.902500f,
-    0.857375f,
-    0.814506f,
-    0.773781f,
-    0.735092f,
-    0.698337f,
-    0.663420f,
-    0.630249f,
-    0.598737f,
-    0.568800f,
-    0.540360f,
-    0.513342f,
-    0.487675f,
-    0.463291f,
-    0.440127f,
-    0.418120f,
-    0.397214f,
-    0.377354f,
-    0.358486f,
-    0.340562f,
-    0.323534f,
-    0.307357f,
-    0.291989f,
-    0.277390f,
-    0.263520f,
-    0.250344f,
-    0.237827f,
-    0.225936f,
-    0.214639f,
-    0.203907f,
-    0.193711f,
-    0.184026f,
-    0.174825f, // <-- 35
-    0.166083f,
-    0.157779f,
-    0.149890f,
-    0.142396f,
-    0.135276f,
-    0.128512f,
-    0.122087f,
-    0.115982f,
-    0.110183f,
-    0.104674f,
-    0.099440f,
-    0.094468f,
-    0.089745f,
-    0.085258f,
-    0.080995f,
-    0.076945f
-)
-
 val TABLE_SIZE = 4096
-val sinTable = FloatArray(TABLE_SIZE) { sin(it * 2.0 * PI / TABLE_SIZE).toFloat() }
-val cosTable = FloatArray(TABLE_SIZE) { cos(it * 2.0 * PI / TABLE_SIZE).toFloat() }
+val sinTable = FloatArray(TABLE_SIZE) { sin((it.toDouble() / TABLE_SIZE - 0.5) * 2.0 * PI).toFloat() }
+val cosTable = FloatArray(TABLE_SIZE) { cos((it.toDouble() / TABLE_SIZE - 0.5) * 2.0 * PI).toFloat() }
+val PRESENCE_CAP = 50
+val DETECTION_RADIUS = 40f
+val INV_COUNT = FloatArray(PRESENCE_CAP + 1) { if (it == 0) 0f else 1f / it }
+val INV_DETECTION_RADIUS = 1 / DETECTION_RADIUS
+val TARGET_RADIUS = DETECTION_RADIUS / 2f
+val INV_TARGET_RADIUS = 1 / TARGET_RADIUS

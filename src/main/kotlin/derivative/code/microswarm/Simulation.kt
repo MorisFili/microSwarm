@@ -36,7 +36,7 @@ class Simulation(
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 37
+        const val NET_IN = 25
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
             Array(CELLS_PER_COLUMN) {
@@ -50,7 +50,7 @@ class Simulation(
                 val x = rng.nextFloat(0f, CANVAS_X.toFloat())
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
                 val hue = palette[rng.nextInt(palette.size)]
-                val nn = Network(NET_IN, 2, 3, 3)
+                val nn = Network(NET_IN, 2, 2, 3, 5)
                 nextAgentIndex++
                 Agent(x, y, i, hue, network = nn)
             } else null
@@ -299,7 +299,7 @@ class Simulation(
             input, intent,
             adrenal, dopamine, sero
         )
-        val nn = Network(NET_IN, 2, 3, 3)
+        val nn = Network(NET_IN, 2,2, 3, 5)
 
         val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {

@@ -1,15 +1,22 @@
 package derivative.code.microswarm.entity
 
+import derivative.code.microswarm.INV_COUNT
+import derivative.code.microswarm.INV_DETECTION_RADIUS
+import derivative.code.microswarm.INV_TARGET_RADIUS
 import derivative.code.microswarm.Main
 import derivative.code.microswarm.Simulation
+import derivative.code.microswarm.Simulation.Companion.rng
+import derivative.code.microswarm.TABLE_SIZE
+import derivative.code.microswarm.cosTable
 import derivative.code.microswarm.managePopHueCounter
 import derivative.code.microswarm.network.Network
+import derivative.code.microswarm.sinTable
 import javafx.scene.paint.Color
 import java.util.Arrays
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.random.Random
+import kotlin.math.sign
 
 
 open class Agent(
@@ -34,7 +41,6 @@ open class Agent(
     val entitiesInProximity = arrayOfNulls<Entity>(5)
     var withinActionRadius = false
     var TARGET: Agent? = null
-    var bestTargetScore = 0f
     val targetedBy = arrayOfNulls<Agent>(20)
     var foodField: Food? = null
     var foodFieldDistance = 1f
@@ -44,11 +50,14 @@ open class Agent(
     var INCUBATION_MATERIAL: GeneticMaterial? = null
     val preState = FloatArray(network.inputStates)
     val postState = FloatArray(network.inputStates)
-    var facingX = 1f
+    val preMotorInputs = FloatArray(network.motionInputs)
+    val postMotorInputs = FloatArray(network.motionInputs)
+    var facingX = 0f
     var facingY = 1f
-    var oldFacingX = 0f
-    var oldFacingY = 0f
-    var distMoved = 0f
+    var explorationTargetX = 0f
+    var explorationTargetY = 0f
+    var metaData = FloatArray(15)
+
     var output = FloatArray(network.networkOutputs)
     var ENERGY = 100f
     val MAX_ENERGY = 100f
@@ -65,8 +74,8 @@ open class Agent(
     var isApathic = false
 
     fun randomizeTraits() {
-        isMale = Random.nextFloat() < 0.5
-        isApathic = Random.nextFloat() < 0.1
+        isMale = rng.nextFloat() < 0.5
+        isApathic = rng.nextFloat() < 0.1
     }
 
     init {
@@ -84,8 +93,9 @@ open class Agent(
     }
 
     fun asyncFeedForward() {
-        network.feedForward(preState, output)
-        selectTarget(output)
+        network.generateIntent(preState, output)
+        generateIntentState(preMotorInputs)
+        selectTarget()
     }
 
     fun syncPerformAction() {
@@ -100,69 +110,65 @@ open class Agent(
 
     fun asyncActionEvaluation() {
         network.actionEvaluation()
+        network.generateMovement(preMotorInputs, output)
     }
 
     fun syncMovement() {
-        move(output[0], output[1])
+        move(output[0], output[1], preMotorInputs[0])
     }
 
     fun asyncStateEvaluation() {
         generateState(postState)
+        generateIntentState(postMotorInputs)
         network.stateEvaluation(preState, postState)
+        network.movementEvaluation(preMotorInputs, postMotorInputs)
         network.weightAdjustment()
         ENERGY -= if (INCUBATING) 0.02f else 0.01f
         if (ENERGY <= 0f) starvation()
     }
 
-    private fun selectTarget(output: FloatArray) {
-
-        if (targetCooldown > 0) return
-
-        // outputs 12..n -> preferences
-        val huePref = output[5].coerceIn(-1f, 1f) // +1 -> same hue, -1 -> other hue
-        val sexPref = output[6].coerceIn(-1f, 1f) // +1 -> other sex, -1 -> same sex
-        val reputationPref = output[7].coerceIn(-1f, 1f) // +1 -> good rep, -1 -> bad rep
+    private fun selectTarget() {
 
         // ========= Targeted By Block =========
-        var acuteScore = 0f
+        var bestTargetedDistance = 1000f
         var closestTargetedBy: Agent? = null
         for (i in 0 until targetedBy.size) {
             val other = targetedBy[i] ?: continue
             val distance = cheapDistance(this, other) / targetRadius
-            acuteScore += other.KILL_COUNT * (1 - other.REPUTATION) * (1 - distance)
-            if (lineOfSightCheck(other)) {
+            val urgency = other.KILL_COUNT * (1 - other.REPUTATION) * (1 - distance)
+            if (urgency > 0.5f && distance < bestTargetedDistance && lineOfSightCheck(other)) {
                 closestTargetedBy = other
+                bestTargetedDistance = distance
             }
         }
 
         // ======== Possible targets ========
-        var bestScore = 0f
+        var bestDistSq = 1000f
         var bestTarget: Agent? = null
         for (agent in agentsInProximity) {
             if (agent == null) continue
             if (!agent.enabled) continue
             if (lineOfSightCheck(agent)) {
 
-                val hueScore = if (agent.hue == this.hue) huePref else -huePref
-                val sexScore = if (agent.isMale != this.isMale) sexPref else -sexPref
-                val reputationScore = if (agent.REPUTATION >= 0.5f) reputationPref else -reputationPref
+                val dx = agent.x - x
+                val dy = agent.y - y
+                val targetDistSq = dx * dx + dy * dy
 
-                val agentScore = hueScore + sexScore + reputationScore
-
-                if (agentScore > bestScore) {
-                    bestScore = agentScore
+                // Pick closest to anchor
+                if (targetDistSq < bestDistSq) {
+                    bestDistSq = targetDistSq
                     bestTarget = agent
                 }
             }
         }
 
         // Self defense preference
-        if (acuteScore > bestTargetScore && acuteScore > bestScore) {
-            setTarget(closestTargetedBy)
-            bestTargetScore = acuteScore
-        } else if (bestScore > bestTargetScore) {
-            setTarget(bestTarget)
-            bestTargetScore = bestScore
+        if (targetCooldown < 1) {
+            if (closestTargetedBy != null) {
+                setTarget(closestTargetedBy)
+            } else if (bestTarget != null) {
+                setTarget(bestTarget)
+            }
         }
     }
 
@@ -263,78 +269,72 @@ open class Agent(
         foodFieldDistance = if (closestFood != null) closestDistSqFood / (maxRadiusSq) else 1f
 
         // ========= Coordination Block =========
+
         // Familiar Group
-        val famAvgDX = if (familiarCount > 0) (familiarX / familiarCount) / detectionRadius else 0f
-        val famAvgDY = if (familiarCount > 0) (familiarY / familiarCount) / detectionRadius else 0f
-        val familiarCenterX = famAvgDX * -facingY + famAvgDY * facingX
-        val familiarCenterY = famAvgDX * facingX + famAvgDY * facingY
+        val famAvgDX =
+            if (familiarCount > 0) familiarX * INV_COUNT[familiarCount.toInt()] * INV_DETECTION_RADIUS else 0f
+        val famAvgDY =
+            if (familiarCount > 0) familiarY * INV_COUNT[familiarCount.toInt()] * INV_DETECTION_RADIUS else 0f
+        metaData[0] = famAvgDX * -facingY + famAvgDY * facingX
+        metaData[1] = famAvgDX * facingX + famAvgDY * facingY
         val familiarGroupSize = familiarCount / GROUP_SIZE
-        val familiarDistance = if (familiarCount > 0) {
-            val avgDX = familiarX / familiarCount
-            val avgDY = familiarY / familiarCount
-            val dist = cheapDistance(avgDX, avgDY)
-            (dist / detectionRadius)
-        } else 0f
+        val familiarDistance = if (familiarCount > 0) cheapDistance(famAvgDX, famAvgDY) else 0f
+        metaData[2] = familiarDistance
 
         // Unfamiliar Group
-        val unFamAvgDX = if (unFamiliarCount > 0) (unFamiliarX / unFamiliarCount) / detectionRadius else 0f
-        val unFamAvgDY = if (unFamiliarCount > 0) (unFamiliarY / unFamiliarCount) / detectionRadius else 0f
-        val unFamiliarCenterX = unFamAvgDX * -facingY + unFamAvgDY * facingX
-        val unFamiliarCenterY = unFamAvgDX * facingX + unFamAvgDY * facingY
+        val unFamAvgDX =
+            if (unFamiliarCount > 0) unFamiliarX * INV_COUNT[unFamiliarCount.toInt()] * INV_DETECTION_RADIUS else 0f
+        val unFamAvgDY =
+            if (unFamiliarCount > 0) unFamiliarY * INV_COUNT[unFamiliarCount.toInt()] * INV_DETECTION_RADIUS else 0f
+        metaData[3] = unFamAvgDX * -facingY + unFamAvgDY * facingX
+        metaData[4] = unFamAvgDX * facingX + unFamAvgDY * facingY
         val unFamiliarGroupSize = unFamiliarCount / GROUP_SIZE
-        val unFamiliarThreat = if (unFamiliarCount > 0) {
-            val avgDX = unFamiliarX / unFamiliarCount
-            val avgDY = unFamiliarY / unFamiliarCount
-            val dist = cheapDistance(avgDX, avgDY)
-            1 - (dist / detectionRadius)
-        } else 0f
+        val unFamiliarThreat = if (unFamiliarCount > 0) (1 - cheapDistance(unFamAvgDX, unFamAvgDY)) else 0f
+        metaData[5] = unFamiliarThreat
 
         // Center of danger
-        val dangerAvgDX = if (dangerCount > 0) (dangerX / dangerCount) / detectionRadius else 0f
-        val dangerAvgDY = if (dangerCount > 0) (dangerY / dangerCount) / detectionRadius else 0f
-        val dangerCenterX = dangerAvgDX * -facingY + dangerAvgDY * facingX
-        val dangerCenterY = dangerAvgDX * facingX + dangerAvgDY * facingY
-        val dangerCenterStrength =
-            if (dangerCount > 0) (localDangerValue / dangerCount) else 0f
-        val dangerCenterThreat = if (dangerCount > 0) {
-            val avgDX = dangerX / dangerCount
-            val avgDY = dangerY / dangerCount
-            val dist = cheapDistance(avgDX, avgDY)
-            1 - (dist / detectionRadius)
-        } else 0f
+        val dangerAvgDX = if (dangerCount > 0) dangerX * INV_COUNT[dangerCount.toInt()] * INV_DETECTION_RADIUS else 0f
+        val dangerAvgDY = if (dangerCount > 0) dangerY * INV_COUNT[dangerCount.toInt()] * INV_DETECTION_RADIUS else 0f
+        metaData[6] = dangerAvgDX * -facingY + dangerAvgDY * facingX
+        metaData[7] = dangerAvgDX * facingX + dangerAvgDY * facingY
+        val dangerCenterStrength = if (dangerCount > 0) localDangerValue * INV_COUNT[dangerCount.toInt()] else 0f
+        val dangerCenterThreat = if (dangerCount > 0) (1f - cheapDistance(dangerAvgDX, dangerAvgDY)) else 0f
+        metaData[8] = dangerCenterThreat
 
         // Target
-        val targetDX = if (target != null) (target.x - x) / targetRadius else 0f
-        val targetDY = if (target != null) (target.y - y) / targetRadius else 0f
-        val targetX = targetDX * -facingY + targetDY * facingX
-        val targetY = targetDX * facingX + targetDY * facingY
-        val targetDistance = if (target != null) cheapDistance(this, target) / targetRadius else 0f
-
+        val targetDX = if (target != null) (target.x - x) * INV_TARGET_RADIUS else 0f
+        val targetDY = if (target != null) (target.y - y) * INV_TARGET_RADIUS else 0f
+        metaData[9] = targetDX * -facingY + targetDY * facingX
+        metaData[10] = targetDX * facingX + targetDY * facingY
+        val targetDistance = if (target != null) cheapDistance(this, target) * INV_TARGET_RADIUS else 0f
+        metaData[11] = targetDistance
         val attractiveness = if (target != null) {
-            val sexCompat   = if (target.isMale != isMale) 1f else 0f
-            val repQuality  = target.REPUTATION.coerceIn(0f, 1f)
-            val health      = (target.ENERGY / target.MAX_ENERGY).coerceIn(0f, 1f)
-            val available   = if (!target.INCUBATING) 1f else 0f
+            val sexCompat = if (target.isMale != isMale) 1f else 0f
+            val repQuality = target.REPUTATION.coerceIn(0f, 1f)
+            val health = (target.ENERGY / target.MAX_ENERGY).coerceIn(0f, 1f)
+            val available = if (!target.INCUBATING) 1f else 0f
             sexCompat * 0.5f + repQuality * 0.25f + health * 0.15f + available * 0.1f
         } else 0f
+
 
         val threat = if (target != null) {
             val dangerScore = (target.KILL_COUNT / (1f + target.KILL_COUNT)) *
                     (1f - target.REPUTATION).coerceIn(0f, 1f)
-            val apathic     = if (target.isApathic) 0.3f else 0f
-            val huntingMe   = if (targetedBy.any { it === target }) 1f else 0f
+            val apathic = if (target.isApathic) 0.3f else 0f
+            val huntingMe = if (targetedBy.any { it === target }) 1f else 0f
             (dangerScore * 0.5f + apathic * 0.2f + huntingMe * 0.3f).coerceIn(0f, 1f)
         } else 0f
 
-        val targetEval  = (attractiveness - threat).coerceIn(-1f, 1f)
+        val targetEval = (attractiveness - threat).coerceIn(-1f, 1f)
 
         // Resources
-        val resourceDX = if (closestFood != null) (closestFood.x - x) / detectionRadius else 0f
-        val resourceDY = if (closestFood != null) (closestFood.y - y) / detectionRadius else 0f
-        val resourceX = resourceDX * -facingY + resourceDY * facingX
-        val resourceY = resourceDX * facingX + resourceDY * facingY
+        val resourceDX = if (closestFood != null) (closestFood.x - x) * INV_DETECTION_RADIUS else 0f
+        val resourceDY = if (closestFood != null) (closestFood.y - y) * INV_DETECTION_RADIUS else 0f
+        metaData[12] = resourceDX * -facingY + resourceDY * facingX
+        metaData[13] = resourceDX * facingX + resourceDY * facingY
         val resourceDistance = if (closestFood != null)
-            cheapDistance(this, closestFood) / detectionRadius else 0f
+            cheapDistance(this, closestFood) * INV_DETECTION_RADIUS else 0f
+        metaData[14] = resourceDistance
 
         // Environmental
         val incubationMultiplier = if (INCUBATING) 2f else 1f
@@ -378,10 +378,11 @@ open class Agent(
 
 
         val sum = adrenaline + dopamine + serotonin
+        val invSum = 1 / sum
 
-        val adrNorm = if (sum > 1f) adrenaline / sum else adrenaline
-        val dopNorm = if (sum > 1f) dopamine / sum else dopamine
-        val serNorm = if (sum > 1f) serotonin / sum else serotonin
+        val adrNorm = if (sum > 1f) adrenaline * invSum else adrenaline
+        val dopNorm = if (sum > 1f) dopamine * invSum else dopamine
+        val serNorm = if (sum > 1f) serotonin * invSum else serotonin
 
 
         // ========= State Assignment Block =========
@@ -390,46 +391,169 @@ open class Agent(
         state[1] = dopNorm.coerceIn(0f, 1f)
         state[2] = serNorm.coerceIn(0f, 1f)
         // same hue group coordination
-        state[3] = familiarCenterX.coerceIn(-1f, 1f)
-        state[4] = familiarCenterY.coerceIn(-1f, 1f)
-        state[5] = familiarDistance.coerceIn(0f, 1f)
-        state[6] = familiarGroupSize.coerceIn(0f, 1f)
+        state[3] = familiarDistance.coerceIn(0f, 1f)
+        state[4] = familiarGroupSize.coerceIn(0f, 1f)
         // other hue group coordination
-        state[7] = unFamiliarCenterX.coerceIn(-1f, 1f)
-        state[8] = unFamiliarCenterY.coerceIn(-1f, 1f)
-        state[9] = unFamiliarThreat.coerceIn(0f, 1f)
-        state[10] = unFamiliarGroupSize.coerceIn(0f, 1f)
+        state[5] = unFamiliarThreat.coerceIn(0f, 1f)
+        state[6] = unFamiliarGroupSize.coerceIn(0f, 1f)
         // renegade group coordination
-        state[11] = dangerCenterX.coerceIn(-1f, 1f)
-        state[12] = dangerCenterY.coerceIn(-1f, 1f)
-        state[13] = dangerCenterThreat.coerceIn(0f, 1f)
-        state[14] = dangerCenterStrength.coerceIn(0f, 1f)
+        state[7] = dangerCenterThreat.coerceIn(0f, 1f)
+        state[8] = dangerCenterStrength.coerceIn(0f, 1f)
         // resource coordination
-        state[15] = resourceX.coerceIn(-1f, 1f)
-        state[16] = resourceY.coerceIn(-1f, 1f)
-        state[17] = resourceDistance.coerceIn(0f, 1f)
+        state[9] = resourceDistance.coerceIn(0f, 1f)
         // target coordination
-        state[18] = targetX.coerceIn(-1f, 1f)
-        state[19] = targetY.coerceIn(-1f, 1f)
-        state[20] = targetDistance.coerceIn(0f, 1f)
+        state[10] = targetDistance.coerceIn(0f, 1f)
         // target preference
-        state[22] = if (target == null) 0f else if (target.hue == hue) 1f else -1f
-        state[23] = if (target == null) 0f else if (target.isMale != isMale) 1f else -1f
-        state[24] = if (target == null) 0f else if (target.REPUTATION < 0.5f) 1f else 0f
-        state[25] = if (target == null) 0f else if (target.INCUBATING) -1f else 1f
+        state[11] = if (target == null) 0f else if (target.hue == hue) 1f else -1f
+        state[12] = if (target == null) 0f else if (target.isMale != isMale) 1f else -1f
+        state[13] = if (target == null) 0f else if (target.REPUTATION < 0.5f) 1f else 0f
+        state[14] = if (target == null) 0f else if (target.INCUBATING) -1f else 1f
         // global environmental && self
-        state[21] = facingX.coerceIn(-1f, 1f)
-        state[36] = facingY.coerceIn(-1f, 1f)
-        state[26] = if (withinActionRadius) 1f else 0f
-        state[27] = crowdingState.coerceIn(-1f, 1f)
-        state[28] = threatState.coerceIn(-1f, 1f)
-        state[29] = if (INCUBATING) 1f else 0f
-        state[30] = REPUTATION.coerceIn(0f, 1f)
-        state[31] = safetyScore.coerceIn(0f, 1f)
-        state[32] = resourceDensity.coerceIn(0f, 1f)
-        state[33] = explorationPressure.coerceIn(0f, 1f)
-        state[34] = hunger.coerceIn(0f, 1f)
-        state[35] = discomfortState.coerceIn(0f, 1f)
+        state[15] = if (withinActionRadius) 1f else 0f
+        state[16] = crowdingState.coerceIn(-1f, 1f)
+        state[17] = threatState.coerceIn(-1f, 1f)
+        state[18] = if (INCUBATING) 1f else 0f
+        state[19] = REPUTATION.coerceIn(0f, 1f)
+        state[20] = safetyScore.coerceIn(0f, 1f)
+        state[21] = resourceDensity.coerceIn(0f, 1f)
+        state[22] = explorationPressure.coerceIn(0f, 1f)
+        state[23] = hunger.coerceIn(0f, 1f)
+        state[24] = discomfortState.coerceIn(0f, 1f)
+
+    }
+
+    private fun generateIntentState(state: FloatArray) {
+
+        val familiarCenterX = metaData[0]
+        val familiarCenterY = metaData[1]
+        val familiarDistance = metaData[2]
+
+        val unFamiliarCenterX = metaData[3]
+        val unFamiliarCenterY = metaData[4]
+        val unFamiliarThreat = metaData[5]
+
+        val dangerCenterX = metaData[6]
+        val dangerCenterY = metaData[7]
+        val dangerCenterThreat = metaData[8]
+
+        val targetX = metaData[9]
+        val targetY = metaData[10]
+        val targetDistance = metaData[11]
+
+        val resourceX = metaData[12]
+        val resourceY = metaData[13]
+        val resourceDistance = metaData[14]
+
+        // Softmax-Argmax logic for Intent
+        //          EXPLORE (0)
+        // 5 ->   TARGET (1)
+        // 6 ->   FOOD (2)
+        // 7 -> FAMILIAR (3)
+        // 8 -> UNFAMILIAR (4)
+        // 9 -> DANGER
+
+        var intentDistance = 1f
+        var alignmentError = 0f
+
+        val intentTarget = output[5]
+        val intentFood = output[6]
+        val intentFam = output[7]
+        val intentUnFam = output[8]
+        val intentDanger = output[9]
+
+        var invalidTarget = false
+
+        when (network.COMMITED_INTENT) {
+            1 -> invalidTarget = targetDistance == 0f
+            2 -> invalidTarget = resourceDistance == 0f
+            3 -> invalidTarget = familiarDistance == 0f
+            4 -> invalidTarget = unFamiliarThreat == 0f
+        }
+
+        if (network.COMMITED_INTENT != 0 && !invalidTarget) {
+
+            // Intent translation
+            var steerX = (intentTarget * targetX) + (intentFood * resourceX) +
+                    (intentFam * familiarCenterX) +
+                    (intentUnFam * unFamiliarCenterX) + (intentDanger * dangerCenterX)
+
+            var steerY = (intentTarget * targetY) + (intentFood * resourceY) +
+                    (intentFam * familiarCenterY) +
+                    (intentUnFam * unFamiliarCenterY) + (intentDanger * dangerCenterY)
+
+            val normalizedTargetDistance = targetDistance * 2f
+
+            val wTarget = abs(intentTarget)
+            val wFood = abs(intentFood)
+            val wFam = abs(intentFam)
+            val wUnFam = abs(intentUnFam)
+            val wDanger = abs(intentDanger)
+            val wSum = wTarget + wFood + wFam + wUnFam + wDanger
+
+            intentDistance = if (wSum > 1e-4f) (
+                    wTarget * (if (intentTarget >= 0f) normalizedTargetDistance else 1f - normalizedTargetDistance) +
+                            wFood * (if (intentFood >= 0f) resourceDistance else 1f - resourceDistance) +
+                            wFam * (if (intentFam >= 0f) familiarDistance else 1f - familiarDistance) +
+                            wUnFam * (if (intentUnFam >= 0f) 1f - unFamiliarThreat else unFamiliarThreat) +
+                            wDanger * (if (intentDanger >= 0f) 1f - dangerCenterThreat else dangerCenterThreat)
+                    ) / wSum else 0f
+
+            val steerMagnitude = cheapDistance(steerX, steerY)
+            if (steerMagnitude > 0.0001f) {
+                steerX /= steerMagnitude
+                steerY /= steerMagnitude
+            }
+
+            alignmentError = 0.5f * (1 - steerY) * if (abs(steerX) > 0f) sign(steerX) else 1f
+
+            // Clear old exploration target
+            explorationTargetX = 0f
+            explorationTargetY = 0f
+
+        } else {
+            // Exploration block
+
+            // Out of range check
+            val distance = cheapDistance(explorationTargetX - x, explorationTargetY - y)
+            if (distance > detectionRadius) {
+                explorationTargetX = 0f
+                explorationTargetY = 0f
+            }
+
+            if (explorationTargetX == 0f && explorationTargetY == 0f) {
+                val angle = rng.nextFloat(0.25f, 0.75f) * TABLE_SIZE
+                val cos = cosTable[angle.toInt()]
+                val sin = sinTable[angle.toInt()]
+                explorationTargetX = x + (facingX * cos - facingY * sin) * 35f
+                explorationTargetY = y + (facingX * sin + facingY * cos) * 35f
+            }
+
+            val explDX = (explorationTargetX - x) * INV_DETECTION_RADIUS
+            val explDY = (explorationTargetY - y) * INV_DETECTION_RADIUS
+
+            val explorationDist = cheapDistance(explDX, explDY)
+
+            var explX = (explDX * -facingY + explDY * facingX) + (intentDanger * dangerCenterX)
+            var explY = (explDX * facingX + explDY * facingY) + (intentDanger * dangerCenterY)
+            val explorationMag = cheapDistance(explX, explY)
+
+            if (explorationMag > 0.0001f) {
+                explX /= explorationMag
+                explY /= explorationMag
+                alignmentError = 0.5f * (1 - explY) * if (abs(explX) > 0f) sign(explX) else 1f
+            } else alignmentError = 0f
+
+            intentDistance = (explorationDist + (abs(intentDanger) * dangerCenterThreat)) / (1f + abs(intentDanger))
+
+            if (explorationDist < 0.1f) {
+                // Target reached
+                explorationTargetX = 0f
+                explorationTargetY = 0f
+            }
+        }
+
+        state[0] = alignmentError.coerceIn(-1f, 1f)
+        state[1] = intentDistance.coerceIn(0f, 1f)
 
     }
 
@@ -542,9 +666,10 @@ open class Agent(
 
                             if (network.explorationSignal) {
                                 if (withinActionRadius) {
-                                    if (!isApathic) network.valence -= 1f // remorse
-                                    if (target.REPUTATION < 0.5f) network.valence += 1f - (target.REPUTATION * 2f)
-                                } else network.valence -= 0.2f
+                                    network.valence += (1f - (ENERGY/MAX_ENERGY))
+                                    if (target.REPUTATION < 0.5f && !isApathic)
+                                        network.valence += 1f - (target.REPUTATION * 2f)
+                                } else network.valence -= 0.1f
                                 return
                             }
 
@@ -557,12 +682,13 @@ open class Agent(
                                 }
                                 kill(target)
                                 clearTarget()
+                                ENERGY += target.ENERGY * 0.5f
                                 targetCooldown = 50
-                                if (target.REPUTATION < 0.5f) network.valence += 1f - (target.REPUTATION * 2f)
-                                if (!isApathic) network.valence -= 1f // remorse
+                                if (target.REPUTATION < 0.5f && !isApathic)
+                                    network.valence += 1f - (target.REPUTATION * 2f)
                                 REPUTATION -= target.REPUTATION * 0.5f
                                 return
-                            } else network.valence -= 0.2f
+                            } else network.valence -= 0.1f
                             targetCooldown = 10
                         }
                     }
@@ -571,20 +697,26 @@ open class Agent(
         }
     }
 
-    private fun move(moveX: Float, moveY: Float) {
-        if (abs(moveX) + abs(moveY) < 0.0001f) return
+    private fun move(rotate: Float, drive: Float, alignmentError: Float) {
+        val movement = drive.coerceIn(-1f, 1f) * (1 - abs(alignmentError))
+        val rotation = rotate.coerceIn(-1f, 1f)
+        val angleIndex = (((rotation + 1) / 2) * TABLE_SIZE).toInt().coerceIn(0, TABLE_SIZE - 1)
+        val cosA = cosTable[angleIndex]
+        val sinA = sinTable[angleIndex]
 
-        var newX = x + moveX
-        var newY = y + moveY
+        val newFX = facingX * cosA - facingY * sinA
+        val newFY = facingX * sinA + facingY * cosA
+
+        facingX = newFX
+        facingY = newFY
+
+        var newX = x + (facingX * movement)
+        var newY = y + (facingY * movement)
 
         if (newX >= 999.99f) newX -= 999.99f
         if (newX < 0f) newX += 999.99f
         if (newY >= 999.99f) newY -= 999.99f
         if (newY < 0f) newY += 999.99f
-
-        distMoved = 0f
-        oldFacingX = facingX
-        oldFacingY = facingY
 
         // Occupancy check
         val gridX = newX.toInt()
@@ -596,32 +728,15 @@ open class Agent(
         if (Simulation.occupancyGrid[gridX][gridY]) { // If new position is occupied
             // Try X
             if (!Simulation.occupancyGrid[gridX][oldGridY]) {
-                distMoved += abs(moveX)
                 x = newX
             }
             // Try Y
             if (!Simulation.occupancyGrid[oldGridX][gridY]) {
-                distMoved += abs(moveY)
                 y = newY
             }
         } else {
-            distMoved += abs(moveX)
-            distMoved += abs(moveY)
             x = newX
             y = newY
-        }
-        // facing normalization voodoo code to keep facingX + facingY =~1f
-        val len = cheapDistance(moveX, moveY)
-        if (len > 0.000001f) {
-            val targetFX = moveX / len
-            val targetFY = moveY / len
-            val newFX = facingX + (targetFX - facingX) * 0.5f
-            val newFY = facingY + (targetFY - facingY) * 0.5f
-            val newLen = cheapDistance(newFX, newFY) // renormalization of the new facing
-            if (newLen > 0.000001f) {
-                facingX = newFX / newLen
-                facingY = newFY / newLen
-            }
         }
         Simulation.occupancyGrid[x.toInt()][y.toInt()] = true
 
@@ -646,7 +761,6 @@ open class Agent(
             if (target.targetedBy[i] === this) {
                 target.targetedBy[i] = null
                 TARGET = null
-                bestTargetScore = 0f
                 withinActionRadius = false
             }
         }
@@ -681,24 +795,6 @@ open class Agent(
         } else return false
     }
 
-    private fun getDotProductValue(): Float {
-        val v1x = oldFacingX
-        val v1y = oldFacingY
-        val v2x = facingX
-        val v2y = facingY
-
-        val lenSq1 = v1x * v1x + v1y * v1y
-        val lenSq2 = v2x * v2x + v2y * v2y
-
-        if (lenSq1 < 0.000001f || lenSq2 < 0.000001f) return 0f
-
-        val dot = v1x * v2x + v1y * v2y
-        val cosSquared = (dot * dot) / (lenSq1 * lenSq2)
-
-        return if (dot >= 0f) cosSquared else -cosSquared
-
-    }
-
     private fun kill(target: Agent) {
         // Death related logic
         if (!target.enabled) return
@@ -718,7 +814,7 @@ open class Agent(
     }
 
     fun analysis(): String {
-        return network.analysis(postState)
+        return network.analysis(postState, output)
     }
 
     fun exportWeights(): Network.WeightsPackage {
