@@ -31,6 +31,7 @@ import javafx.scene.layout.HBox
 import javafx.scene.layout.Pane
 import javafx.scene.layout.Priority
 import javafx.scene.layout.Region
+import javafx.scene.layout.StackPane
 import javafx.scene.layout.VBox
 import javafx.scene.paint.Color
 import javafx.scene.text.Font
@@ -73,23 +74,37 @@ class Main : Application() {
         var MALE_POP = 0
 
         @Volatile
-        var APATHIC_POP = 0
-
-        @Volatile
         var RENEGADE_POP = 0
         @Volatile
+        var TOP_RENEGADE_ID = -1
+
+        @Volatile
+        var PARAGON_POP = 0
+        @Volatile
+        var TOP_PARAGON_ID = -1
+        @Volatile
         var showIncubating = false
+
         @Volatile
         var showStarving = false
+        @Volatile
+        var showAgent = false
+
+        @Volatile
+        var showAllWeights = false
 
 
         val populationCounter = AtomicInteger(0)
         val killedOwnHue = AtomicInteger(0)
+        val killedOwnHueByStealing = AtomicInteger(0)
         val killedOtherHue = AtomicInteger(0)
+        val killedOtherHueByStealing = AtomicInteger(0)
+        val sharedWithSameHue = AtomicInteger(0)
+        val sharedWithOtherHue = AtomicInteger(0)
+        val stoleFromSameHue = AtomicInteger(0)
+        val stoleFromOtherHue = AtomicInteger(0)
         val spawnedWithOwnHue = AtomicInteger(0)
         val spawnedWithOtherHue = AtomicInteger(0)
-        val spawnAttempts = AtomicInteger(0)
-        val killAttempts = AtomicInteger(0)
         val magentaAgents = AtomicInteger(0)
         val whiteAgents = AtomicInteger(0)
         val pinkAgents = AtomicInteger(0)
@@ -107,6 +122,7 @@ class Main : Application() {
         isEditable = false
         promptText = "Select Agent"
         maxWidth = Double.MAX_VALUE
+        padding = Insets(0.0, 0.0, 0.0, 5.0)
     }
     val outputText = Label().apply {
         textFill = Color.rgb(220, 225, 235)
@@ -135,17 +151,14 @@ class Main : Application() {
 
         val topBar = HBox()
         topBar.apply {
-            prefHeight = 48.0
-            minHeight = 48.0
-            maxHeight = 48.0
 
-            spacing = 12.0
+            padding = Insets(10.0)
+            spacing = 10.0
             alignment = Pos.CENTER_LEFT
-            padding = Insets(8.0, 14.0, 8.0, 14.0)
 
             background = Background(
                 BackgroundFill(
-                    Color.rgb(28, 30, 34),
+                    Color.rgb(24, 26, 30),
                     CornerRadii.EMPTY,
                     Insets.EMPTY
                 )
@@ -200,24 +213,27 @@ class Main : Application() {
         topBar.children.addAll(startBtn, resetBtn, saveBtn, loadBtn, topBarSpacer, multiThreadToggle)
 
         val canvas = Canvas(CANVAS_X, CANVAS_Y)
-        val graphicsContext = canvas.graphicsContext2D
-        val canvasPane = Pane(canvas)
-        canvasPane.apply {
-            canvasPane.minWidth = CANVAS_X
-            canvasPane.prefWidth = CANVAS_X
-            canvasPane.maxWidth = CANVAS_X
+        canvas.setOnMouseClicked {e ->
+            simulation.selectAgent(e.x, e.y)
+            topLabel.text = "Agent ID: $SELECTED_AGENT_ID"
+        }
 
-            canvasPane.minHeight = CANVAS_Y
-            canvasPane.prefHeight = CANVAS_Y
-            canvasPane.maxHeight = CANVAS_Y
+        val graphicsContext = canvas.graphicsContext2D
+        val canvasPane = StackPane(canvas).apply {
+            minWidth = CANVAS_X
+            prefWidth = CANVAS_X
+            maxWidth = CANVAS_X
+            minHeight = CANVAS_Y
+            prefHeight = CANVAS_Y
+            maxHeight = CANVAS_Y
         }
 
         // ========================== AGENT INFO SECTION ==========================
 
         val rightPanel = VBox()
         rightPanel.apply {
-            spacing = 12.0
-            padding = Insets(14.0)
+            padding = Insets(0.0, 0.0, 0.0, 5.0)
+            spacing = 10.0
 
             background = Background(
                 BackgroundFill(
@@ -232,7 +248,7 @@ class Main : Application() {
                     Color.rgb(55, 58, 65),
                     BorderStrokeStyle.SOLID,
                     CornerRadii.EMPTY,
-                    BorderWidths(0.0, 0.0, 0.0, 1.0)
+                    BorderWidths(0.0, 0.0, 0.0, 2.0)
                 )
             )
         }
@@ -248,11 +264,26 @@ class Main : Application() {
         val spacer = Region()
         HBox.setHgrow(spacer, Priority.ALWAYS)
 
-        val topWrapper = HBox(topLabel, spacer, copyBtn).apply {
+        val detailedWeightsToggle = CheckBox("Detailed View: Disabled").apply {
+            textFill = Color.rgb(220, 225, 235)
+            isSelected = false
+            font = Font.font("System", FontWeight.SEMI_BOLD, 14.0)
+            padding = Insets(0.0, 0.0, 0.0, 10.0) // top, right, bottom, left
+            selectedProperty().addListener { _, _, selected ->
+                showAllWeights = selected
+                text = if (selected) "Detailed View: Enabled" else "Detailed View: Disabled"
+
+            }
+        }
+
+
+        val topWrapper = HBox(topLabel, detailedWeightsToggle, spacer, copyBtn).apply {
             maxWidth = Double.MAX_VALUE
+            padding = Insets(0.0, 0.0, 0.0, 5.0)
         }
 
         val innerPanel = HBox().apply {
+            padding = Insets(0.0, 0.0, 0.0, 5.0)
             maxWidth = Double.MAX_VALUE
             prefHeight = 700.0
             maxHeight = 700.0
@@ -297,26 +328,44 @@ class Main : Application() {
             toggleGroup = highLightGroup
         }
 
+        val highlightAgent = RadioButton("Highlight Selected Agent").apply {
+            textFill = Color.rgb(220, 225, 235)
+            padding = Insets(10.0)
+            toggleGroup = highLightGroup
+        }
+
         highLightGroup.selectedToggleProperty().addListener { _, _, newToggle ->
             when (newToggle) {
                 highlightHungry -> {
                     showStarving = true
                     showIncubating = false
+                    showAgent = false
                 }
+
                 highlightIncubating -> {
                     showStarving = false
                     showIncubating = true
+                    showAgent = false
                 }
+
+                highlightAgent -> {
+                    showStarving = false
+                    showIncubating = false
+                    showAgent = true
+                }
+
                 else -> {
                     showStarving = false
                     showIncubating = false
+                    showAgent = false
                 }
             }
         }
 
 
 
-        instrumentPanel.children.addAll(highlightNone, highlightHungry, highlightIncubating)
+        instrumentPanel.children.addAll(highlightNone, highlightHungry, highlightIncubating,
+            highlightAgent)
 
         HBox.setHgrow(scrollableWrapper, Priority.ALWAYS)
         HBox.setHgrow(instrumentPanel, Priority.ALWAYS)
@@ -324,6 +373,7 @@ class Main : Application() {
         innerPanel.children.addAll(scrollableWrapper, instrumentPanel)
 
         rightPanel.children.addAll(
+            topBar,
             topWrapper,
             selector,
             innerPanel
@@ -333,12 +383,12 @@ class Main : Application() {
 
         val bottomArea = HBox()
         bottomArea.apply {
-            spacing = 12.0
-            padding = Insets(12.0, 14.0, 12.0, 14.0)
+            spacing = 15.0
+            padding = Insets(12.0, 10.0, 12.0, 10.0)
 
             background = Background(
                 BackgroundFill(
-                    Color.rgb(22, 24, 28),
+                    Color.rgb(24, 26, 30),
                     CornerRadii.EMPTY,
                     Insets.EMPTY
                 )
@@ -352,6 +402,7 @@ class Main : Application() {
                     BorderWidths(1.0, 0.0, 0.0, 0.0)
                 )
             )
+
         }
 
         val populationLabel = Label().apply {
@@ -361,6 +412,9 @@ class Main : Application() {
             textFill = Color.rgb(220, 225, 235)
         }
         val deathLabel = Label().apply {
+            textFill = Color.rgb(220, 225, 235)
+        }
+        val ecoTransferLabel = Label().apply {
             textFill = Color.rgb(220, 225, 235)
         }
         val spawnLabel = Label().apply {
@@ -375,19 +429,25 @@ class Main : Application() {
 
         bottomArea.children.addAll(
             populationLabel, agentColorLabel,
-            deathLabel, spawnLabel, space, systemInfoLabel
+            deathLabel, ecoTransferLabel, spawnLabel, systemInfoLabel
         )
 
         rightPanel.children.add(bottomArea)
 
-        val mainArea = HBox(canvasPane, rightPanel)
+        val mainArea = HBox(canvasPane, rightPanel).apply {
+            padding = Insets(5.0)
+            spacing = 5.0
+            background = Background(
+                BackgroundFill(
+                    Color.rgb(24, 26, 30),
+                    CornerRadii.EMPTY,
+                    Insets.EMPTY
+                )
+            )
+        }
+        val scene = Scene(mainArea)
 
-        val root = VBox(topBar, mainArea)
-        val scene = Scene(root)
-
-        VBox.setVgrow(mainArea, Priority.ALWAYS)
         HBox.setHgrow(rightPanel, Priority.ALWAYS)
-
 
         // =================== EVENTS BLOCK ===================
         selector.setOnAction {
@@ -449,8 +509,10 @@ class Main : Application() {
                         populationLabel.text =
                             "Population: ${popCounter}\n" +
                                     "Male pop: $MALE_POP \n" +
-                                    "Apathic pop: $APATHIC_POP \n" +
-                                    "Renegade pop: $RENEGADE_POP \n"
+                                    "Renegade pop: $RENEGADE_POP \n" +
+                                    "Top Renegade: $TOP_RENEGADE_ID \n" +
+                                    "Paragon pop: $PARAGON_POP \n" +
+                                    "Top Paragon: $TOP_PARAGON_ID \n"
                         agentColorLabel.text =
                             "Population Hues\n" +
                                     "Magenta: %.2f%%\n".format(
@@ -474,14 +536,19 @@ class Main : Application() {
                                                 popCounter * 100.0
                                     )
                         deathLabel.text =
-                            "Killed By Other: ${killedOtherHue.get()}\n" +
-                                    "Killed By Same: ${killedOwnHue.get()}\n" +
-                                    "Kill Attempts: ${killAttempts.get()}\n" +
+                            "Killed Other Hue: ${killedOtherHue.get()}\n" +
+                                    "Killed Other Hue w Stealing: ${killedOtherHueByStealing.get()}\n" +
+                                    "Killed Own Hue: ${killedOwnHue.get()}\n" +
+                                    "Killed Own Hue w Stealing: ${killedOwnHueByStealing.get()}\n" +
                                     "Starvation: ${starvationCounter.get()}"
+                        ecoTransferLabel.text =
+                            "Stole fr Other Hue: ${stoleFromOtherHue.get()}\n" +
+                                    "Stole fr Same Hue: ${stoleFromSameHue.get()}\n" +
+                                    "Shared w Other Hue: ${sharedWithOtherHue.get()}\n" +
+                                    "Shared w Same Hue: ${sharedWithSameHue.get()}"
                         spawnLabel.text =
-                            "Spawned Other Hue: ${spawnedWithOtherHue.get()}\n" +
-                                    "Spawned Same Hue: ${spawnedWithOwnHue.get()}\n" +
-                                    "Spawn Attempts: ${spawnAttempts.get()}"
+                            "Spawned w Other Hue: ${spawnedWithOtherHue.get()}\n" +
+                                    "Spawned w Same Hue: ${spawnedWithOwnHue.get()}\n"
                         systemInfoLabel.text =
                             "--- Over 100 loops: --- \n" +
                                     "Avg. Loop Time: ${AVG_SIM_TICK_TIME / 1000f}ms \n" +
@@ -509,6 +576,8 @@ class Main : Application() {
                         if (agent.INCUBATING) Color.RED else Color.WHITE
                     } else if (showStarving) {
                         if (agent.ENERGY < 50f) Color.RED else Color.WHITE
+                    } else if (showAgent) {
+                        if (agent.id == SELECTED_AGENT_ID) Color.RED else Color.WHITE
                     } else agent.hue
                     graphicsContext.fillRect(agent.x.toDouble(), agent.y.toDouble(), 1.0, 1.0)
                 }

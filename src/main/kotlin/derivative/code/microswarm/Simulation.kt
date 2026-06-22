@@ -7,7 +7,8 @@ import derivative.code.microswarm.entity.Agent
 import derivative.code.microswarm.entity.Entity
 import derivative.code.microswarm.entity.Food
 import derivative.code.microswarm.entity.GeneticMaterial
-import derivative.code.microswarm.network.Network
+import derivative.code.microswarm.entity.Target
+import derivative.code.microswarm.network.Cortex
 import javafx.application.Platform
 import javafx.scene.paint.Color
 import java.util.*
@@ -37,6 +38,10 @@ class Simulation(
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
         const val NET_IN = 25
+        const val MOTION_INPUTS = 2
+        const val MOVEMENT_AXIS = 2
+        const val ACTION_INTENT = 5
+        const val OUTPUT_INTENT = 8
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
             Array(CELLS_PER_COLUMN) {
@@ -50,9 +55,10 @@ class Simulation(
                 val x = rng.nextFloat(0f, CANVAS_X.toFloat())
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
                 val hue = palette[rng.nextInt(palette.size)]
-                val nn = Network(NET_IN, 2, 2, 3, 5)
+                val nn = Cortex(NET_IN, MOTION_INPUTS, MOVEMENT_AXIS,
+                    ACTION_INTENT, OUTPUT_INTENT)
                 nextAgentIndex++
-                Agent(x, y, i, hue, network = nn)
+                Agent(x, y, i, hue, cortex = nn)
             } else null
         }
         val foods = Array(50) { i ->
@@ -147,7 +153,7 @@ class Simulation(
                     }
 
                     agent.MATE_CONDITION = false
-                    agent.clearTarget()
+                    Target.clearTarget(agent)
                 }
             }
 
@@ -177,6 +183,7 @@ class Simulation(
             // Last phase (async)
             index = 0
             futures.clear()
+            val memoryDecay = triggerCounter % 10 == 0 // Memory decay every 10 ticks (200ms)
             while (index < activeAgentsCount) {
                 val from = index
                 val to = minOf(from + chunkSize, activeAgentsCount)
@@ -184,6 +191,7 @@ class Simulation(
                     var i = from
                     while (i < to) {
                         activeAgents[i]!!.asyncStateEvaluation()
+                        if (memoryDecay) activeAgents[i]!!.memoryDecay()
                         i++
                     }
                 }
@@ -207,7 +215,7 @@ class Simulation(
                         }
                     }
                     entity.MATE_CONDITION = false
-                    entity.clearTarget()
+                    Target.clearTarget(entity)
                 }
                 entity.asyncActionEvaluation()
                 entity.syncMovement()
@@ -228,20 +236,35 @@ class Simulation(
             }
         }
 
-        if (triggerCounter >= 25) {
+        if (triggerCounter >= 20) {
             var totalMale = 0
-            var totalApathic = 0
             var totalRene = 0
+            var totalPara = 0
+            var topReneScore = 0f
+            var topReneId = 0
+            var topParaScore = 0f
+            var topParaId = 0
             for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
                 if (entity.isMale) totalMale++
-                if (entity.isApathic) totalApathic++
-                if (entity.REPUTATION < 0.5f) totalRene++
+                val popularity = entity.globalPopularity
+                if (popularity <= -0.5f) totalRene++
+                if (popularity >= 0.5f) totalPara++
+                if (popularity > topParaScore) {
+                    topParaScore = popularity
+                    topParaId = entity.id
+                }
+                if (popularity < topReneScore) {
+                    topReneScore = popularity
+                    topReneId = entity.id
+                }
             }
             Main.MALE_POP = totalMale
-            Main.APATHIC_POP = totalApathic
             Main.RENEGADE_POP = totalRene
+            Main.PARAGON_POP = totalPara
+            Main.TOP_RENEGADE_ID = topReneId
+            Main.TOP_PARAGON_ID = topParaId
             triggerCounter = 0
         }
 
@@ -267,27 +290,11 @@ class Simulation(
             }
         }
 
-        val adrenal = a1weights.transferAdrenergic
-        val adrenal2 = a2weights.transferAdrenergic
-        for (i in 0 until adrenal.size) {
+        val output = a1weights.transferOutput
+        val output2 = a2weights.transferOutput
+        for (i in 0 until output.size) {
             if (rng.nextFloat() < 0.5f) {
-                for (j in adrenal[i].indices) adrenal[i][j] = adrenal2[i][j]
-            }
-        }
-
-        val dopamine = a1weights.transferDopaminergic
-        val dopamine2 = a2weights.transferDopaminergic
-        for (i in 0 until dopamine.size) {
-            if (rng.nextFloat() < 0.5f) {
-                for (j in dopamine[i].indices) dopamine[i][j] = dopamine2[i][j]
-            }
-        }
-
-        val sero = a1weights.transferSerotonergic
-        val sero2 = a2weights.transferSerotonergic
-        for (i in 0 until sero.size) {
-            if (rng.nextFloat() < 0.5f) {
-                for (j in sero[i].indices) sero[i][j] = sero2[i][j]
+                for (j in output[i].indices) output[i][j] = output2[i][j]
             }
         }
 
@@ -295,11 +302,12 @@ class Simulation(
         val x = spawnCoordinates[0].toFloat()
         val y = spawnCoordinates[1].toFloat()
         val hue = (if (rng.nextFloat() < 0.5f) a1.hue else a2.hue) ?: Color.WHITE
-        val weights = Network.WeightsPackage(
+        val weights = Cortex.WeightsPackage(
             input, intent,
-            adrenal, dopamine, sero
+            output
         )
-        val nn = Network(NET_IN, 2,2, 3, 5)
+        val nn = Cortex(NET_IN, MOTION_INPUTS,MOVEMENT_AXIS,
+            ACTION_INTENT, OUTPUT_INTENT)
 
         val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {
@@ -313,7 +321,6 @@ class Simulation(
             nextAgent.importWeights(weights)
             nextAgent.resetState()
             nextAgent.isMale = rng.nextFloat() < 0.5f
-            nextAgent.isApathic = a1.isApathic || a2.apathic // dominant trait test
         }
         Main.populationCounter.incrementAndGet()
         managePopHueCounter(hue)
@@ -368,5 +375,37 @@ class Simulation(
             }
         }
 
+    }
+
+    fun selectAgent(mouseX: Double, mouseY: Double) {
+
+        val gx = (mouseX / CELL_SIZE).toInt()
+        val gy = (mouseY / CELL_SIZE).toInt()
+
+        var bestAgentId = -1
+        var bestAgentDist = 10000f
+
+        for (x in gx - 1..gx + 1) {
+            for (y in gy - 1..gy + 1) {
+                if (x < 0 || y < 0 || x >= CELLS_PER_ROW || y >= CELLS_PER_ROW) continue
+                val agentsInGrid = gridCellCount[x][y]
+                for (z in 0 until agentsInGrid) {
+                    val other = entityGrid[x][y][z] ?: continue
+                    if (!other.enabled) continue
+
+                    val dx = (mouseX - other.x).toFloat()
+                    val dy = (mouseY - other.y).toFloat()
+                    val distSq = dx * dx + dy * dy
+
+                    if (distSq < bestAgentDist) {
+                        bestAgentId = other.id
+                        bestAgentDist = distSq
+                    }
+
+                }
+            }
+        }
+
+        Main.SELECTED_AGENT_ID = if (bestAgentId != -1) bestAgentId else return
     }
 }

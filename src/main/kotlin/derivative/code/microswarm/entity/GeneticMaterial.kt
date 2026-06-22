@@ -1,10 +1,9 @@
 package derivative.code.microswarm.entity
 
-import derivative.code.microswarm.network.Network
+import derivative.code.microswarm.network.Cortex
 import javafx.scene.paint.Color
 
 class GeneticMaterial(
-    val weights: Network.WeightsPackage,
-    val hue: Color,
-    val apathic: Boolean
+    val weights: Cortex.WeightsPackage,
+    val hue: Color
 )
