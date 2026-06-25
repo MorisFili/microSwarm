@@ -1,12 +1,13 @@
 package derivative.code.microswarm.entity
 
-import derivative.code.microswarm.GROUP_SIZE
 import derivative.code.microswarm.INV_MAX_ENERGY
 import derivative.code.microswarm.MAX_ENERGY
 import derivative.code.microswarm.Main
 import derivative.code.microswarm.Simulation
 import derivative.code.microswarm.TABLE_SIZE
 import derivative.code.microswarm.cosTable
+import derivative.code.microswarm.entity.StateIndex.TARGET_ATTRACTIVENESS
+import derivative.code.microswarm.entity.StateIndex.TARGET_THREAT
 import derivative.code.microswarm.managePopHueCounter
 import derivative.code.microswarm.sinTable
 import kotlin.math.max
@@ -59,13 +60,13 @@ object Action {
 
                     when (choice) {
                         MATE -> {
-                            network.valence += self.preState[1] * self.targetAttractiveness
+                            network.valence += self.preState[1] * self.preState[TARGET_ATTRACTIVENESS]
                             return
                         }
 
                         KILL -> {
                             val enmity = max(0f, -targetSocialValence) // Hostility towards target
-                            val threat = self.threatFromTarget * (1 - self.targetDistance)
+                            val threat = self.preState[TARGET_THREAT] * (1 - self.targetDistance)
                             val targetFriendsCount = target.friendsInProximityCount
                             val targetWitnessCount = target.agentsInProximityCount
                             val targetPopularity = target.localPopularity
@@ -132,7 +133,7 @@ object Action {
                     }
 
                     val energyRatio = self.ENERGY / MAX_ENERGY
-                    self.ENERGY += 10f
+                    self.ENERGY += food.energyPerEat
                     food.value--
 
                     val valence = if (energyRatio <= 1f) {
@@ -179,6 +180,11 @@ object Action {
     fun move(self: Agent, rotate: Float, drive: Float) {
         val movement = drive.coerceIn(-1f, 1f)
         val rotation = rotate.coerceIn(-1f, 1f)
+
+        for (i in self.networkAccess().foodMemoryRot.indices) {
+            self.networkAccess().foodMemoryRot[i] -= rotation
+        }
+
         val angleIndex = (((rotation + 1) / 2) * TABLE_SIZE).toInt().coerceIn(0, TABLE_SIZE - 1)
         val cosA = cosTable[angleIndex]
         val sinA = sinTable[angleIndex]
@@ -270,7 +276,7 @@ object Action {
                 myStanding, myHunger
             )
 
-            if (targetApproval < 0.1) { // Shunned
+            if (targetApproval < 0.3f) { // Shunned
                 Target.upsertTargetValence(self, target.id, -0.1f)
                 Target.upsertTargetValence(target, self.id, -0.1f)
                 self.targetCooldown = 10

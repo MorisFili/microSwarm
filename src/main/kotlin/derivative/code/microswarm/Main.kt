@@ -1,11 +1,8 @@
 package derivative.code.microswarm
 
 import derivative.code.microswarm.Simulation.Companion.agents
-import derivative.code.microswarm.Simulation.Companion.foods
-import javafx.animation.AnimationTimer
 import javafx.application.Application
 import javafx.application.Platform
-import javafx.beans.binding.Bindings
 import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene
@@ -16,7 +13,6 @@ import javafx.scene.control.ComboBox
 import javafx.scene.control.Label
 import javafx.scene.control.RadioButton
 import javafx.scene.control.ScrollPane
-import javafx.scene.control.Slider
 import javafx.scene.control.ToggleGroup
 import javafx.scene.input.Clipboard
 import javafx.scene.input.ClipboardContent
@@ -28,7 +24,6 @@ import javafx.scene.layout.BorderStrokeStyle
 import javafx.scene.layout.BorderWidths
 import javafx.scene.layout.CornerRadii
 import javafx.scene.layout.HBox
-import javafx.scene.layout.Pane
 import javafx.scene.layout.Priority
 import javafx.scene.layout.Region
 import javafx.scene.layout.StackPane
@@ -75,18 +70,22 @@ class Main : Application() {
 
         @Volatile
         var RENEGADE_POP = 0
+
         @Volatile
         var TOP_RENEGADE_ID = -1
 
         @Volatile
         var PARAGON_POP = 0
+
         @Volatile
         var TOP_PARAGON_ID = -1
+
         @Volatile
         var showIncubating = false
 
         @Volatile
         var showStarving = false
+
         @Volatile
         var showAgent = false
 
@@ -114,6 +113,8 @@ class Main : Application() {
     }
 
     // Class properties
+    val canvas = Canvas(CANVAS_X, CANVAS_Y)
+    val renderer = SimulationRenderer(this)
     val topLabel = Label("Agent ID: 0").apply {
         textFill = Color.rgb(220, 225, 235)
         font = Font.font("System", FontWeight.SEMI_BOLD, 14.0)
@@ -212,13 +213,12 @@ class Main : Application() {
 
         topBar.children.addAll(startBtn, resetBtn, saveBtn, loadBtn, topBarSpacer, multiThreadToggle)
 
-        val canvas = Canvas(CANVAS_X, CANVAS_Y)
-        canvas.setOnMouseClicked {e ->
+
+        canvas.setOnMouseClicked { e ->
             simulation.selectAgent(e.x, e.y)
             topLabel.text = "Agent ID: $SELECTED_AGENT_ID"
         }
 
-        val graphicsContext = canvas.graphicsContext2D
         val canvasPane = StackPane(canvas).apply {
             minWidth = CANVAS_X
             prefWidth = CANVAS_X
@@ -364,8 +364,10 @@ class Main : Application() {
 
 
 
-        instrumentPanel.children.addAll(highlightNone, highlightHungry, highlightIncubating,
-            highlightAgent)
+        instrumentPanel.children.addAll(
+            highlightNone, highlightHungry, highlightIncubating,
+            highlightAgent
+        )
 
         HBox.setHgrow(scrollableWrapper, Priority.ALWAYS)
         HBox.setHgrow(instrumentPanel, Priority.ALWAYS)
@@ -458,43 +460,57 @@ class Main : Application() {
 
         // -----------------------------------------------------
         // Main simulation thread at 50hz
-        var tickCount = 0
-        var totalUpdateNs = 0L
-        var maxUpdateNs = 0L
-        var over12ms = 0
-        var over16ms = 0
-        var over20ms = 0
-        simLoop.scheduleAtFixedRate({
-            try {
-                if (RUNNING) {
-                    val start = System.nanoTime()
-                    simulation.update()
-                    val elapsed = System.nanoTime() - start
-                    totalUpdateNs += elapsed
-                    if (elapsed > maxUpdateNs) maxUpdateNs = elapsed
-                    tickCount++
-                    if (elapsed > 12_000_000L) over12ms++
-                    if (elapsed > 16_000_000L) over16ms++
-                    if (elapsed > 20_000_000L) over20ms++
-                    if (tickCount >= 100) {
-                        AVG_SIM_TICK_TIME = (totalUpdateNs / tickCount / 1000).toInt()
-                        MAX_SIM_TICK_TIME = (maxUpdateNs / 1000).toInt()
-                        TICKS_OVER_12 = over12ms
-                        TICKS_OVER_16 = over16ms
-                        TICKS_OVER_20 = over20ms
+        val simulationLoop = object : Runnable {
+            var tickCount = 0
+            var totalUpdateNs = 0L
+            var maxUpdateNs = 0L
+            var over12ms = 0
+            var over16ms = 0
+            var over20ms = 0
+            var delay = 10L
+            override fun run() {
+                try {
+                    if (RUNNING) {
+                        val start = System.nanoTime()
 
-                        tickCount = 0
-                        totalUpdateNs = 0L
-                        maxUpdateNs = 0L
-                        over12ms = 0
-                        over16ms = 0
-                        over20ms = 0
+                        simulation.update()
+                        Platform.runLater { renderer.render() }
+
+                        val elapsed = System.nanoTime() - start
+                        val elapsedMs = elapsed / 1_000_000L
+                        delay = (20 - elapsedMs).coerceAtLeast(0)
+
+
+                        totalUpdateNs += elapsed
+                        if (elapsed > maxUpdateNs) maxUpdateNs = elapsed
+                        tickCount++
+                        if (elapsed > 12_000_000L) over12ms++
+                        if (elapsed > 16_000_000L) over16ms++
+                        if (elapsed > 20_000_000L) over20ms++
+                        if (tickCount >= 100) {
+                            AVG_SIM_TICK_TIME = (totalUpdateNs / tickCount / 1000L).toInt()
+                            MAX_SIM_TICK_TIME = (maxUpdateNs / 1000L).toInt()
+                            TICKS_OVER_12 = over12ms
+                            TICKS_OVER_16 = over16ms
+                            TICKS_OVER_20 = over20ms
+
+                            tickCount = 0
+                            totalUpdateNs = 0L
+                            maxUpdateNs = 0L
+                            over12ms = 0
+                            over16ms = 0
+                            over20ms = 0
+                        }
+                    } else {
+                        Platform.runLater { renderer.render() }
                     }
-                }
-            } catch (t: Throwable) {
-                println(t.stackTraceToString())
+                } catch (t: Throwable) {
+                    println(t.stackTraceToString())
+                } finally {
+                    if (!simLoop.isShutdown) simLoop.schedule(this, delay, TimeUnit.MILLISECONDS)                }
             }
-        }, 0, 20, TimeUnit.MILLISECONDS)
+        }
+        simLoop.schedule(simulationLoop, 0, TimeUnit.MILLISECONDS)
 
         // Main sim thread running analysis 2.5 times per sec
         simLoop.scheduleAtFixedRate(analyze@{
@@ -563,34 +579,6 @@ class Main : Application() {
             }
         }, 0, 400, TimeUnit.MILLISECONDS)
 
-        object : AnimationTimer() {
-            override fun handle(now: Long) {
-                // optional RUNNING boolean gate
-                graphicsContext.fill = Color.BLACK
-                graphicsContext.fillRect(0.0, 0.0, canvas.width, canvas.height)
-
-                for (agent in agents) {
-                    if (agent == null) continue
-                    if (!agent.enabled) continue
-                    graphicsContext.fill = if (showIncubating) {
-                        if (agent.INCUBATING) Color.RED else Color.WHITE
-                    } else if (showStarving) {
-                        if (agent.ENERGY < 50f) Color.RED else Color.WHITE
-                    } else if (showAgent) {
-                        if (agent.id == SELECTED_AGENT_ID) Color.RED else Color.WHITE
-                    } else agent.hue
-                    graphicsContext.fillRect(agent.x.toDouble(), agent.y.toDouble(), 1.0, 1.0)
-                }
-
-                for (resource in foods) {
-                    if (!resource.enabled) continue
-                    graphicsContext.fill = resource.hue
-                    graphicsContext.fillRect(resource.x.toDouble(), resource.y.toDouble(), 2.0, 2.0)
-                }
-
-            }
-        }.start()
-
         stage.scene = scene
         stage.width = Screen.getPrimary().visualBounds.width
         stage.height = Screen.getPrimary().visualBounds.height
@@ -601,6 +589,7 @@ class Main : Application() {
 
     override fun stop() {
         RUNNING = false
+        renderer.removeHandlers()
         simLoop.shutdownNow()
         simulation.shutDownThreads()
         Platform.exit()

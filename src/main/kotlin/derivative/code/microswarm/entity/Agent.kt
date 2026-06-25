@@ -31,7 +31,7 @@ open class Agent(
     val preMotorInputs = FloatArray(cortex.motionInputs)
     val postMotorInputs = FloatArray(cortex.motionInputs)
     var output = FloatArray(cortex.networkOutputs)
-    var metaData = FloatArray(15)
+    var metaData = FloatArray(20)
     val interactionId = IntArray(128) { -1 }
     val interactionValence = FloatArray(128)
     val neurotransmitters = FloatArray(3)
@@ -61,6 +61,7 @@ open class Agent(
     var agentsInProximityCount = 0
     var friendsInProximityCount = 0
     var foodInProximityCount = 0
+    var recognizedFoodCount = 0
     var targetCooldown = 0
 
     // Social Valence
@@ -71,8 +72,6 @@ open class Agent(
     // Target pointers
     var TARGET: Agent? = null
     var targetDistance = 0f
-    var targetAttractiveness = 0f
-    var threatFromTarget = 0f
     var targetPopularity = 0f
 
 
@@ -127,7 +126,6 @@ open class Agent(
         State.generateIntentState(this, postMotorInputs)
         cortex.stateEvaluation(preState, postState, neurotransmitters)
         cortex.movementEvaluation(preMotorInputs, postMotorInputs, output)
-        cortex.weightAdjustment()
         ENERGY -= if (INCUBATING) 0.1f else 0.01f
         if (ENERGY <= 0f) starvation()
     }

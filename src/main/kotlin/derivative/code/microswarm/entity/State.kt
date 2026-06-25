@@ -1,6 +1,7 @@
 package derivative.code.microswarm.entity
 
 import derivative.code.microswarm.DETECTION_RADIUS
+import derivative.code.microswarm.EATING_PROXIMITY
 import derivative.code.microswarm.GROUP_SIZE
 import derivative.code.microswarm.INV_COUNT
 import derivative.code.microswarm.INV_DETECTION_RADIUS
@@ -103,11 +104,35 @@ object State {
         for (entity in self.entitiesInProximity) { // Non-agent entity array
             if (entity is Food) {
                 if (!entity.enabled) continue
-                val distance = Target.cheapDistance(self, entity) * INV_DETECTION_RADIUS // normalized 0..1
-                val prox = (1f - distance).coerceIn(0f, 1f)
+                val distance = Target.cheapDistance(self, entity) // normalized 0..1
+                val prox = (1f - (distance * INV_DETECTION_RADIUS)).coerceIn(0f, 1f)
                 val ripeness = (entity.value / 25f).coerceIn(0f, 1f)
                 val availability = (1f + entity.decaySpeed).coerceIn(0f, 1f)
                 foodValue += prox * ripeness * availability
+
+                // Only check if the amount of food nodes change between ticks
+                // Big performance saver
+                if (self.foodInProximityCount > self.recognizedFoodCount) {
+                    if (!self.networkAccess().foodEntityId.contains(entity.id)) {
+                        val dx = (entity.x - self.x) * INV_DETECTION_RADIUS
+                        val dy = (entity.y - self.y) * INV_DETECTION_RADIUS
+
+                        var rotX = dx * -self.facingY + dy * self.facingX
+                        var rotY = dx * self.facingX + dy * self.facingY
+                        val normalizationVal = Target.cheapDistance(rotX, rotY)
+                        if (normalizationVal > 0.0001) {
+                            rotX /= normalizationVal
+                            rotY /= normalizationVal
+                        }
+                        val memoryIdx = self.networkAccess().foodRingBuffer
+                        self.networkAccess().foodRingBuffer = (memoryIdx + 1) % 3
+
+                        self.networkAccess().foodMemoryRot[memoryIdx] =
+                            acosTable[((rotY + 1f) * 0.5f * (TABLE_SIZE - 1)).toInt().coerceIn(0, TABLE_SIZE - 1)] *
+                                    if (abs(rotX) > 0f) sign(rotX) else 1f
+                        self.networkAccess().foodEntityId[memoryIdx] = entity.id
+                    }
+                }
 
                 if (distance < closestDist) {
                     closestDist = distance
@@ -115,9 +140,11 @@ object State {
                 }
             }
         }
+        self.recognizedFoodCount = self.foodInProximityCount
+
         // Crude gate that checks both for proximity and availability
         // 10px = grazing radius
-        self.foodField = if (closestFood != null && closestDist < 0.25f) closestFood else null
+        self.foodField = if (closestFood != null && closestDist <= EATING_PROXIMITY) closestFood else null
         self.foodFieldDistance = if (closestFood != null) closestDist else 1f
 
         // ========= Coordination Block =========
@@ -171,19 +198,20 @@ object State {
         val targetPopularity = if (target != null) target.localPopularity else 0f
         val targetHunger = if (target != null) 1 - (target.ENERGY * INV_MAX_ENERGY) else 0f
 
-        self.targetAttractiveness = if (target != null) {
+        val targetAttractiveness = if (target != null) {
             val sexCompat = if (target.isMale != self.isMale) 1f else 0f
             val health = (target.ENERGY * INV_MAX_ENERGY).coerceIn(0f, 1f)
             val available = if (!target.INCUBATING) 1f else 0f
             sexCompat * 0.5f + health * 0.15f + available * 0.1f
         } else 0f
+        self.metaData[15] = targetAttractiveness
 
-        self.threatFromTarget = if (target != null) {
+        val threatFromTarget = if (target != null) {
             val valence = if (targetValence < 0) abs(targetValence) else 0f
             val huntingMe = if (self.targetedBy.any { it === target }) 1f else 0f
             (huntingMe * valence).coerceIn(0f, 1f)
         } else 0f
-
+        self.metaData[16] = threatFromTarget
 
         // Resources
         val resourceDX = if (closestFood != null) (closestFood.x - self.x) * INV_DETECTION_RADIUS else 0f
@@ -225,27 +253,29 @@ object State {
         val crowdingWithNoFood = crowdingState.coerceIn(0f, 1f) * (1f - resourceDensity.coerceIn(0f, 1f))
         val threatenedAndVulnerable = immediateThreat * incubationMultiplier
         val hungryWithNoFoodAround = hunger * (1f - resourceDensity.coerceIn(0f, 1f))
-        val targetedByThreatUrgency = self.threatFromTarget * (1f - self.targetDistance)
+        val targetedByThreatUrgency = threatFromTarget * (1f - self.targetDistance)
         val dislikedByOthers = max(0f, -popularitySquared).coerceAtMost(0.65f)
 
         val adrenaline = (
-            (discomfortAxis + dislikedByOthers) * mattersLessWhenHungry +
-                crowdingWithNoFood + threatenedAndVulnerable + hungryWithNoFoodAround +
-                    targetedByThreatUrgency + dangerAxis
+                (discomfortAxis + dislikedByOthers) * mattersLessWhenHungry +
+                        crowdingWithNoFood + threatenedAndVulnerable + hungryWithNoFoodAround +
+                        targetedByThreatUrgency + dangerAxis
                 ).coerceIn(0f, 1f)
         self.neurotransmitters[0] = adrenaline
 
 
         // DOPAMINE - Appetite/Desire signal
-        val attractiveTargetUrgency = self.targetAttractiveness * (1 - self.targetDistance)
+        val attractiveTargetUrgency = targetAttractiveness * (1 - self.targetDistance)
         val hungryWithFoodAround = hunger * resourceDensity.coerceIn(0f, 1f)
-        val stickingWithFriends = friendlyGroupSize * (1f - friendlyDistance) * 0.5f * incubationMultiplier
+        val stickingWithFriends = friendlyGroupSize * (1f - friendlyDistance)
         val foragingWhenNoFoodAround = hunger * (1f - resourceDensity.coerceIn(0f, 1f)) *
                 (self.agentsInProximityCount * 0.03125f).coerceAtMost(1f) * localAgentEnergyValue
 
         val dopamine = (
-            (attractiveTargetUrgency + stickingWithFriends) * mattersLessWhenHungry +
-                hungryWithFoodAround + foragingWhenNoFoodAround + explorationPressure.coerceIn(0f, 1f)
+                (attractiveTargetUrgency * 0.30f + stickingWithFriends * 0.20f) * mattersLessWhenHungry +
+                        hungryWithFoodAround * 0.30f +
+                        foragingWhenNoFoodAround * 0.10f +
+                        explorationPressure.coerceIn(0f,1f) * 0.25f
                 ).coerceIn(0f, 1f)
         self.neurotransmitters[1] = dopamine
 
@@ -257,7 +287,7 @@ object State {
 
         val serotonin = (
                 (feelingSafe + likedByOthers) * mattersLessWhenHungry +
-                feelingSated + resourceAvailability
+                        feelingSated + resourceAvailability
                 ).coerceIn(0f, 1f)
         self.neurotransmitters[2] = serotonin
 
@@ -282,6 +312,8 @@ object State {
         state[11] = if (target == null) 0f else if (target.INCUBATING) -1f else 1f
         state[12] = if (target == null) 0f else targetPopularity.coerceIn(0f, 1f) // local social standing
         state[24] = targetHunger.coerceIn(0f, 1f)
+        state[25] = targetAttractiveness.coerceIn(0f, 1f)
+        state[26] = threatFromTarget.coerceIn(0f, 1f)
         // global environmental && self
         state[13] = if (self.withinActionRadius) 1f else 0f
         state[14] = if (self.foodField != null) 1f else 0f
@@ -327,8 +359,8 @@ object State {
         // 10 -> UNFAMILIAR
         // 11 -> UNFRIENDLY
 
-        var intentDistance = 1f
-        var alignmentError = 0f
+        var intentDistance = Float.NaN
+        var alignmentError = Float.NaN
 
         var intentTarget = self.output[7]
         var intentFood = self.output[8]
@@ -337,26 +369,30 @@ object State {
         val intentDanger = self.output[11]
 
         var invalidTarget = false
+        val selectedIntent = self.networkAccess().committedSpatialIntent
 
-        when (self.networkAccess().committedSpatialIntent) {
+        when (selectedIntent) {
             1 -> {
                 invalidTarget = targetDistance == 0f
                 intentFood = 0f
                 intentFam = 0f
                 intentUnFam = 0f
             }
+
             2 -> {
                 invalidTarget = resourceDistance == 0f
                 intentTarget = 0f
                 intentFam = 0f
                 intentUnFam = 0f
             }
+
             3 -> {
                 invalidTarget = friendlyDistance == 0f
                 intentTarget = 0f
                 intentFood = 0f
                 intentUnFam = 0f
             }
+
             4 -> {
                 invalidTarget = unFamiliarDistance == 0f
                 intentTarget = 0f
@@ -410,6 +446,24 @@ object State {
         } else {
             // Exploration block
 
+            if (invalidTarget) {
+                // Check memory
+                if (selectedIntent == 2) { // Food
+                    val memoryIdx = (self.networkAccess().foodRingBuffer + 2) % 3
+                    val memoryRot = self.networkAccess().foodMemoryRot[memoryIdx]
+                    if (!memoryRot.isNaN()) {
+                        alignmentError = memoryRot
+
+                        val angleIndex = (((alignmentError + 1) / 2) * TABLE_SIZE).toInt().coerceIn(0, TABLE_SIZE - 1)
+                        val cosA = cosTable[angleIndex]
+                        val sinA = sinTable[angleIndex]
+
+                        self.explorationTargetX = self.x + (self.facingX * cosA - self.facingY * sinA) * 35f
+                        self.explorationTargetY = self.y + (self.facingX * sinA + self.facingY * cosA) * 35f
+                    }
+                }
+            }
+
             // Out of range check
             val distance = Target.cheapDistance(self.explorationTargetX - self.x, self.explorationTargetY - self.y)
             if (distance > DETECTION_RADIUS) {
@@ -460,29 +514,33 @@ object State {
     }
 }
 
-// State Mapping
-const val FRIEND_DIST = 0
-const val FRIEND_GROUP_SIZE = 1
-const val UNFAM_DIST = 2
-const val UNFAM_SIZE = 3
-const val HOSTILE_DIST = 4
-const val HOSTILE_STR = 5
-const val RESOURCE_DIST = 6
-const val TARGET_DIST = 7
-const val TARGET_HUE = 8
-const val TARGET_SEX = 9
-const val TARGET_VALENCE = 10
-const val TARGET_IS_INCUB = 11
-const val TARGET_POPULARITY = 12
-const val TARGET_HUNGER = 24
-const val WITHIN_ACTION_RADIUS = 13
-const val IN_FOOD_FIELD = 14
-const val CROWDING = 15
-const val THREAT = 16
-const val IS_INCUBATING = 17
-const val SAFETY_SCORE = 18
-const val RESOURCE_DENSITY = 19
-const val EXP_PRESSURE = 20
-const val HUNGER = 21
-const val DISCOMFORT = 22
-const val POPULARITY_SQ = 23
+object StateIndex {
+    // State Mapping
+    const val FRIEND_DIST = 0
+    const val FRIEND_GROUP_SIZE = 1
+    const val UNFAM_DIST = 2
+    const val UNFAM_SIZE = 3
+    const val HOSTILE_DIST = 4
+    const val HOSTILE_STR = 5
+    const val RESOURCE_DIST = 6
+    const val TARGET_DIST = 7
+    const val TARGET_HUE = 8
+    const val TARGET_SEX = 9
+    const val TARGET_VALENCE = 10
+    const val TARGET_IS_INCUB = 11
+    const val TARGET_POPULARITY = 12
+    const val TARGET_HUNGER = 24
+    const val WITHIN_ACTION_RADIUS = 13
+    const val IN_FOOD_FIELD = 14
+    const val CROWDING = 15
+    const val THREAT = 16
+    const val IS_INCUBATING = 17
+    const val SAFETY_SCORE = 18
+    const val RESOURCE_DENSITY = 19
+    const val EXP_PRESSURE = 20
+    const val HUNGER = 21
+    const val DISCOMFORT = 22
+    const val POPULARITY_SQ = 23
+    const val TARGET_ATTRACTIVENESS = 25
+    const val TARGET_THREAT = 26
+}

@@ -37,7 +37,7 @@ class Simulation(
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 25
+        const val NET_IN = 27
         const val MOTION_INPUTS = 2
         const val MOVEMENT_AXIS = 2
         const val ACTION_INTENT = 5
@@ -61,9 +61,17 @@ class Simulation(
                 Agent(x, y, i, hue, cortex = nn)
             } else null
         }
-        val foods = Array(50) { i ->
-            val x = rng.nextFloat(50f,950f)
-            val y = rng.nextFloat(50f,950f)
+
+        val numClusters = 5
+        val patchesPerCluster = 5
+        val clusterSpread = 80f
+        val anchors = Array(numClusters) {
+            Pair(rng.nextFloat(150f, 850f), rng.nextFloat(150f, 850f))
+        }
+        val foods = Array(numClusters * patchesPerCluster) { i ->
+            val (anchorX, anchorY) = anchors[i / patchesPerCluster]
+            val x = (anchorX + rng.nextGaussian().toFloat() * clusterSpread).coerceIn(50f, 950f)
+            val y = (anchorY + rng.nextGaussian().toFloat() * clusterSpread).coerceIn(50f, 950f)
             Food(i, x, y)
         }
     }
@@ -225,15 +233,6 @@ class Simulation(
 
         for (resource in foods) {
             resource.update()
-            if (resource.value <= 0) {
-                val coordinates = getNearestUnoccupiedCoordinate(
-                    rng.nextFloat(50f,950f),
-                    rng.nextFloat(50f,950f)
-                )
-                resource.x = coordinates[0].toFloat()
-                resource.y = coordinates[1].toFloat()
-                resource.value = resource.MAX_VALUE
-            }
         }
 
         if (triggerCounter >= 20) {
