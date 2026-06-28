@@ -3,6 +3,7 @@ package derivative.code.microswarm.entity
 import derivative.code.microswarm.ACTION_RADIUS
 import derivative.code.microswarm.INV_TARGET_RADIUS
 import derivative.code.microswarm.TARGET_RADIUS
+import derivative.code.microswarm.network.OutputIndex
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -17,12 +18,12 @@ object Target {
         // 20,21 ->   SEX -> (1) OPPOSITE (-1) SAME
         // 22,23 ->   VALENCE -> (1) POSITIVE (-1) NEGATIVE
         // 24,25 ->   HEALTH -> (1) HIGHEST (-1) LOWEST
-        val sexPref = sign(self.output[12])
-        val sexMag = abs(self.output[12])
-        val valencePref = sign(self.output[13])
-        val valenceMag = abs(self.output[13])
-        val healthPref = sign(self.output[14])
-        val healthMag = abs(self.output[14])
+        val sexPref = sign(self.output[OutputIndex.SEX])
+        val sexMag = abs(self.output[OutputIndex.SEX])
+        val valencePref = sign(self.output[OutputIndex.VALENCE])
+        val valenceMag = abs(self.output[OutputIndex.VALENCE])
+        val healthPref = sign(self.output[OutputIndex.HEALTH])
+        val healthMag = abs(self.output[OutputIndex.HEALTH])
 
         // ========= Targeted By Block =========
         var bestTargetedDistance = 1000f
@@ -58,8 +59,8 @@ object Target {
                 if (self.isMale == other.isMale && sexPref < 0) score += sexMag
                 if (valencePref > 0) score += targetValence * valenceMag
                 if (valencePref < 0) score -= targetValence * valenceMag
-                if (healthPref > 0) score += ((other.ENERGY - 50f) * 0.01f) * healthMag
-                if (healthPref < 0) score += ((50f - other.ENERGY) * 0.01f) * healthMag
+                if (healthPref > 0) score += ((other.energy - 50f) * 0.01f) * healthMag
+                if (healthPref < 0) score += ((50f - other.energy) * 0.01f) * healthMag
 
                 if (score > targetScore) {
                     pickedTarget = other
@@ -95,10 +96,10 @@ object Target {
 
 
     fun getTargetValence(self: Agent, targetId: Int): Float {
-        val startIndex = targetId % 128
+        val startIndex = targetId and 127
         var step = 0
         while (step < 128) {
-            val index = (startIndex + step) % 128
+            val index = (startIndex + step) and 127
             if (self.interactionId[index] == targetId) return self.interactionValence[index]
             if (self.interactionId[index] == -1) return 0f
             step++
@@ -107,20 +108,23 @@ object Target {
     }
 
     fun upsertTargetValence(self: Agent, targetId: Int, valence: Float) {
-        val startIndex = targetId % 128
+        // RW model based updates
+        val startIndex = targetId and 127
         var step = 0
         var emptyIndex = -1
         while (step < 128) {
-            val index = (startIndex + step) % 128
+            val index = (startIndex + step) and 127
             if (self.interactionId[index] == targetId) { // update
-                self.interactionValence[index] += valence
+                val iv = self.interactionValence[index]
+                self.interactionValence[index] = iv + abs(valence) * (sign(valence) - iv)
                 return
             }
             if (emptyIndex == -1 && self.interactionValence[index] == 0f) emptyIndex = index
             if (self.interactionId[index] == -1) { // reached the end - insert
                 val insertIndex = if (emptyIndex != -1) emptyIndex else index
                 self.interactionId[insertIndex] = targetId
-                self.interactionValence[insertIndex] = valence
+                val iv = self.interactionValence[insertIndex]
+                self.interactionValence[insertIndex] = iv + abs(valence) * (sign(valence) - iv)
                 return
             }
             step++
@@ -129,10 +133,10 @@ object Target {
     }
 
     fun removeTargetFromMemory(self: Agent, targetId: Int) {
-        val startIndex = targetId % 128
+        val startIndex = targetId and 127
         var step = 0
         while (step < 128) {
-            val index = (startIndex + step) % 128
+            val index = (startIndex + step) and 127
             if (self.interactionId[index] == targetId) { // ID overwritten in upsert function
                 self.interactionValence[index] = 0f
                 return

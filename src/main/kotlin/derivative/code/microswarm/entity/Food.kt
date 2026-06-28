@@ -11,7 +11,7 @@ class Food(
 
 
     private val MAX_VALUE = 80f
-    private val INV_MAX_VALUE = 1f / MAX_VALUE
+    val INV_MAX_VALUE = 1f / MAX_VALUE
     var value = MAX_VALUE
     var decaySpeed = 0f
     private val REGEN_PER_TICK = 0.5f

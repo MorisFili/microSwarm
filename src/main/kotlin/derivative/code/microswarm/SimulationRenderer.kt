@@ -6,7 +6,6 @@ import derivative.code.microswarm.Main.Companion.showIncubating
 import derivative.code.microswarm.Main.Companion.showStarving
 import derivative.code.microswarm.Simulation.Companion.agents
 import derivative.code.microswarm.Simulation.Companion.foods
-import javafx.animation.AnimationTimer
 import javafx.event.EventHandler
 import javafx.scene.input.MouseEvent
 import javafx.scene.input.ScrollEvent
@@ -99,7 +98,7 @@ class SimulationRenderer(app: Main) {
             graphicsContext.fill = if (showIncubating) {
                 if (agent.INCUBATING) Color.RED else Color.WHITE
             } else if (showStarving) {
-                if (agent.ENERGY < 50f) Color.RED else Color.WHITE
+                if (agent.energy < 50f) Color.RED else Color.WHITE
             } else if (showAgent) {
                 if (agent.id == SELECTED_AGENT_ID) Color.RED else Color.WHITE
             } else agent.hue

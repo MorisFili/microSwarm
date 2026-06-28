@@ -7,6 +7,7 @@ import derivative.code.microswarm.entity.Agent
 import derivative.code.microswarm.entity.Entity
 import derivative.code.microswarm.entity.Food
 import derivative.code.microswarm.entity.GeneticMaterial
+import derivative.code.microswarm.entity.State
 import derivative.code.microswarm.entity.Target
 import derivative.code.microswarm.network.Cortex
 import javafx.application.Platform
@@ -37,11 +38,10 @@ class Simulation(
         const val CELLS_PER_ROW = 1000 / CELL_SIZE
         const val CELLS_PER_COLUMN = 1000 / CELL_SIZE
         const val MAX_PER_CELL = 2500 // maximum, tweak later
-        const val NET_IN = 27
         const val MOTION_INPUTS = 2
         const val MOVEMENT_AXIS = 2
-        const val ACTION_INTENT = 5
-        const val OUTPUT_INTENT = 8
+        const val OUTPUT_PAIRS = 13
+        const val OUTPUT_PREDICTIONS = 2
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
             Array(CELLS_PER_COLUMN) {
@@ -55,8 +55,8 @@ class Simulation(
                 val x = rng.nextFloat(0f, CANVAS_X.toFloat())
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
                 val hue = palette[rng.nextInt(palette.size)]
-                val nn = Cortex(NET_IN, MOTION_INPUTS, MOVEMENT_AXIS,
-                    ACTION_INTENT, OUTPUT_INTENT)
+                val nn = Cortex(State.Index.COUNT, MOTION_INPUTS, MOVEMENT_AXIS,
+                    OUTPUT_PAIRS, OUTPUT_PREDICTIONS)
                 nextAgentIndex++
                 Agent(x, y, i, hue, cortex = nn)
             } else null
@@ -165,29 +165,6 @@ class Simulation(
                 }
             }
 
-            // Async phase
-            index = 0
-            futures.clear()
-            while (index < activeAgentsCount) {
-                val from = index
-                val to = minOf(from + chunkSize, activeAgentsCount)
-                futures += threads.submit {
-                    var i = from
-                    while (i < to) {
-                        activeAgents[i]!!.asyncActionEvaluation()
-                        i++
-                    }
-                }
-                index = to
-            }
-
-            for (future in futures) future.get()
-
-            // Second sync phase
-            for (i in 0 until activeAgentsCount) {
-                activeAgents[i]!!.syncMovement()
-            }
-
             // Last phase (async)
             index = 0
             futures.clear()
@@ -225,8 +202,6 @@ class Simulation(
                     entity.MATE_CONDITION = false
                     Target.clearTarget(entity)
                 }
-                entity.asyncActionEvaluation()
-                entity.syncMovement()
                 entity.asyncStateEvaluation()
             }
         }
@@ -305,11 +280,11 @@ class Simulation(
             input, intent,
             output
         )
-        val nn = Cortex(NET_IN, MOTION_INPUTS,MOVEMENT_AXIS,
-            ACTION_INTENT, OUTPUT_INTENT)
 
         val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {
+            val nn = Cortex(State.Index.COUNT, MOTION_INPUTS,MOVEMENT_AXIS,
+                OUTPUT_PAIRS, OUTPUT_PREDICTIONS)
             agents[nextAgentIndex] = Agent(x, y, nextAgentIndex, hue, true, nn)
             agents[nextAgentIndex]!!.importWeights(weights)
             nextAgentIndex++

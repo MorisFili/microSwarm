@@ -45,14 +45,14 @@ object Cerebellum {
         }
     }
 
-    fun movementEvaluation(self: Cortex, preMotorInputs: FloatArray, postMotorInputs: FloatArray, networkOutputs: FloatArray) {
+    fun movementEvaluation(self: Cortex, preMotorInputs: FloatArray, postMotorInputs: FloatArray, steerCorrection: Float) {
 
         // 0 -> Alignment error
         // 1 -> Distance
 
         val alignmentMultiplier = if (self.avgAlignmentReward > 0) (0.15f / self.avgAlignmentReward).coerceIn(0.1f, 200f) else 1f
         val alignmentCorrection =
-            self.evaluateRotation(preMotorInputs[0], networkOutputs[0])
+            self.evaluateRotation(preMotorInputs[0], steerCorrection)
         val alignmentReward = alignmentCorrection * alignmentMultiplier
         self.accAlignmentReward += abs(alignmentReward)
 
@@ -119,13 +119,13 @@ object Cerebellum {
                 if (!isDrive && j != self.ROTATION_INDEX) continue
                 val adaptiveWeightDecay =
                     self.adaptiveWeightDecay(self.locomotionMemory[i][j], 0.9975f, 0.99f)
-                val delta = self.motorInputs[j] * self.motorContribution[i] * (self.learningRate * 0.25f)
+                val delta = self.motorInputs[j] * self.motorContribution[i] * self.locomotionLearningRate
                 self.locomotionMemory[i][j] = (self.locomotionMemory[i][j] * adaptiveWeightDecay + delta)
                     .coerceIn(-self.maxMemory, self.maxMemory)
 
                 val adaptiveWeightDecay2 =
                     self.adaptiveWeightDecay(self.locomotionMemory[i + 1][j], 0.99f, 0.99f)
-                val delta2 = self.motorInputs[j] * self.motorContribution[i + 1] * (self.learningRate * 0.25f)
+                val delta2 = self.motorInputs[j] * self.motorContribution[i + 1] * self.locomotionLearningRate
                 self.locomotionMemory[i + 1][j] =
                     (self.locomotionMemory[i + 1][j] * adaptiveWeightDecay2 + delta2)
                         .coerceIn(-self.maxMemory, self.maxMemory)

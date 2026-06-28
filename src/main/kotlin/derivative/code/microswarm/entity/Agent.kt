@@ -5,9 +5,12 @@ import derivative.code.microswarm.PRESENCE_CAP
 import derivative.code.microswarm.Simulation
 import derivative.code.microswarm.Simulation.Companion.rng
 import derivative.code.microswarm.managePopHueCounter
+import derivative.code.microswarm.modules.Action
 import derivative.code.microswarm.network.Cortex
+import derivative.code.microswarm.network.OutputIndex
 import javafx.scene.paint.Color
 import java.util.Arrays
+import kotlin.math.abs
 
 
 open class Agent(
@@ -26,20 +29,29 @@ open class Agent(
     val agentsInProximity = arrayOfNulls<Agent>(PRESENCE_CAP)
     val entitiesInProximity = arrayOfNulls<Entity>(5)
     val targetedBy = arrayOfNulls<Agent>(20)
-    val preState = FloatArray(cortex.inputStates)
-    val postState = FloatArray(cortex.inputStates)
+    val currentState = FloatArray(cortex.inputStates)
+
     val preMotorInputs = FloatArray(cortex.motionInputs)
     val postMotorInputs = FloatArray(cortex.motionInputs)
     var output = FloatArray(cortex.networkOutputs)
-    var metaData = FloatArray(20)
+    val metaData = FloatArray(20)
+    val movementMetaData = FloatArray(1)
     val interactionId = IntArray(128) { -1 }
     val interactionValence = FloatArray(128)
-    val neurotransmitters = FloatArray(3)
+    val neurotransmitters = FloatArray(2)
+
+    // state EMA
+    val stateEMA = FloatArray(4)
+    val ownEnergyDelta = 0
+    val hostileDistDelta = 1
+    val groupStress = 2
+    val familiarRatio = 3
 
 
     // Local pointers
     var foodField: Food? = null
     var INCUBATION_MATERIAL: GeneticMaterial? = null
+    val action = Action.Perform
 
 
     // Local variables
@@ -53,8 +65,13 @@ open class Agent(
     var facingY = 1f
     var explorationTargetX = 0f
     var explorationTargetY = 0f
-    var ENERGY = 80f
+    var energy = 80f
+    var digesting = false
+    var digestionTimer = 0
 
+    // Snapshots
+    var PRE_ENERGY_SNAP = 80f
+    var PRE_HOSTILE_DIST = -1f
 
 
     // Social features
@@ -94,17 +111,19 @@ open class Agent(
         }
         if (INCUBATION_TIMER > 0f) INCUBATION_TIMER--
         updateProximity()
-        State.generateState(this, preState)
+        State.generateState(this, currentState)
     }
 
     fun asyncFeedForward() {
-        cortex.generateIntent(preState, output)
-        State.generateIntentState(this, preMotorInputs)
+        cortex.generateIntent(currentState, output)
+        State.intentToSpatialTransformation(this, preMotorInputs)
         Target.selectTarget(this)
+        cortex.generateMovement(preMotorInputs, output)
     }
 
     fun syncPerformAction() {
-        Action.performAction(this, output)
+        action.move(this, output[OutputIndex.ROTATE], output[OutputIndex.DRIVE])
+        action.performAction(this)
         if (INCUBATING && INCUBATION_TIMER < 1f) {
             if (INCUBATION_MATERIAL != null) MATE_CONDITION = true
             INCUBATING = false
@@ -112,22 +131,19 @@ open class Agent(
         }
     }
 
-    fun asyncActionEvaluation() {
-        cortex.actionEvaluation()
-        cortex.generateMovement(preMotorInputs, output)
-    }
-
-    fun syncMovement() {
-        Action.move(this, output[0], output[1])
-    }
-
     fun asyncStateEvaluation() {
-        State.generateState(this, postState)
-        State.generateIntentState(this, postMotorInputs)
-        cortex.stateEvaluation(preState, postState, neurotransmitters)
-        cortex.movementEvaluation(preMotorInputs, postMotorInputs, output)
-        ENERGY -= if (INCUBATING) 0.1f else 0.01f
-        if (ENERGY <= 0f) starvation()
+        State.intentToSpatialTransformation(this, postMotorInputs)
+        cortex.actionEvaluation(neurotransmitters)
+        cortex.stateEvaluation(neurotransmitters)
+        cortex.movementEvaluation(preMotorInputs, postMotorInputs, output[OutputIndex.ROTATE])
+
+        if (digesting) {
+            energy++
+            digestionTimer--
+            digesting = digestionTimer > 0
+        }
+        energy -= if (INCUBATING) 0.1f else 0.01f
+        if (energy <= 0f) starvation()
     }
 
 
@@ -143,7 +159,7 @@ open class Agent(
     }
 
     fun analysis(): String {
-        return cortex.analysis(postState, output)
+        return cortex.analysis(currentState, output, neurotransmitters)
     }
 
     fun exportWeights(): Cortex.WeightsPackage {
@@ -157,12 +173,45 @@ open class Agent(
 
 
     fun memoryDecay() {
-        for (i in 0 until interactionValence.size) interactionValence[i] *= 0.9954f
-        globalPopularity *= 0.9954f // 30 sec half life
+        var compactionNeeded = false
+        for (i in 0 until interactionValence.size) {
+            interactionValence[i] *= 0.9954f
+            if (interactionId[i] != -1 && abs(interactionValence[i]) < 0.005f) {
+                interactionValence[i] = 0f
+                interactionId[i] = -1
+                compactionNeeded = true
+            }
+        }
+        globalPopularity *= 0.9954f
+        if (compactionNeeded) rehashInteractionTable()
     }
 
+    private fun rehashInteractionTable() {
+
+        val ids = IntArray(128)
+        val vals = FloatArray(128)
+        var count = 0
+        for (i in 0 until 128) {
+            if (interactionId[i] != -1) {
+                ids[count] = interactionId[i]
+                vals[count] = interactionValence[i]
+                count++
+            }
+        }
+
+        interactionId.fill(-1)
+        interactionValence.fill(0f)
+        for (k in 0 until count) {
+            var idx = ids[k] and 127
+            while (interactionId[idx] != -1) idx = (idx + 1) and 127
+            interactionId[idx] = ids[k]
+            interactionValence[idx] = vals[k]
+        }
+    }
+
+
     fun resetState() {
-        ENERGY = 60f
+        energy = 60f
         enabled = true
         TARGET = null
         MATE_CONDITION = false
