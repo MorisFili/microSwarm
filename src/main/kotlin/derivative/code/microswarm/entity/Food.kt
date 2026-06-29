@@ -1,6 +1,7 @@
 package derivative.code.microswarm.entity
 
 import javafx.scene.paint.Color
+import kotlin.math.abs
 
 class Food(
     id: Int,
@@ -27,6 +28,7 @@ class Food(
         if (tickerCount >= 50) {  // sample over 1 second instead of 0.2s
             val rawDecay = ((delta * 50f) / (MAX_VALUE * REGEN_PER_TICK)).coerceIn(-1f, 1f)
             decaySpeed = 0.7f * decaySpeed + 0.3f * rawDecay  // exponential smooth
+            if (abs(decaySpeed) < 1e-6f) decaySpeed = 0f
             tickerCount = 0f
         }
         previousValue = value

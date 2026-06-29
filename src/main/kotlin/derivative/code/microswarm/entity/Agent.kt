@@ -133,6 +133,7 @@ open class Agent(
 
     fun asyncStateEvaluation() {
         State.intentToSpatialTransformation(this, postMotorInputs)
+        State.generateState(this, currentState)
         cortex.actionEvaluation(neurotransmitters)
         cortex.stateEvaluation(neurotransmitters)
         cortex.movementEvaluation(preMotorInputs, postMotorInputs, output[OutputIndex.ROTATE])
@@ -183,6 +184,7 @@ open class Agent(
             }
         }
         globalPopularity *= 0.9954f
+        if (abs(globalPopularity) < 1e-6f) globalPopularity = 0f
         if (compactionNeeded) rehashInteractionTable()
     }
 
@@ -220,6 +222,8 @@ open class Agent(
         INCUBATION_MATERIAL = null
         INCUBATION_TIMER = 0
         targetCooldown = 0
+        cortex.weightGate = 0f
+        cortex.actionWeightGate = 0f
         Arrays.fill(interactionValence, 0f)
         Arrays.fill(interactionId, -1)
     }

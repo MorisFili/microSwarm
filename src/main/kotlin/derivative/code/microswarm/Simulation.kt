@@ -40,8 +40,8 @@ class Simulation(
         const val MAX_PER_CELL = 2500 // maximum, tweak later
         const val MOTION_INPUTS = 2
         const val MOVEMENT_AXIS = 2
-        const val OUTPUT_PAIRS = 13
-        const val OUTPUT_PREDICTIONS = 2
+        const val OUTPUTS = 15
+
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
             Array(CELLS_PER_COLUMN) {
@@ -56,22 +56,22 @@ class Simulation(
                 val y = rng.nextFloat(0f, CANVAS_Y.toFloat())
                 val hue = palette[rng.nextInt(palette.size)]
                 val nn = Cortex(State.Index.COUNT, MOTION_INPUTS, MOVEMENT_AXIS,
-                    OUTPUT_PAIRS, OUTPUT_PREDICTIONS)
+                    OUTPUTS)
                 nextAgentIndex++
                 Agent(x, y, i, hue, cortex = nn)
             } else null
         }
 
-        val numClusters = 5
-        val patchesPerCluster = 5
-        val clusterSpread = 80f
-        val anchors = Array(numClusters) {
-            Pair(rng.nextFloat(150f, 850f), rng.nextFloat(150f, 850f))
+        val numClusters = 2
+        val patchesPerCluster = 4
+        val clusterSpread = 20f
+        val anchors = Array(numClusters) { i ->
+            Pair(200 + 600 * i, 200 + 600 * i)
         }
         val foods = Array(numClusters * patchesPerCluster) { i ->
             val (anchorX, anchorY) = anchors[i / patchesPerCluster]
-            val x = (anchorX + rng.nextGaussian().toFloat() * clusterSpread).coerceIn(50f, 950f)
-            val y = (anchorY + rng.nextGaussian().toFloat() * clusterSpread).coerceIn(50f, 950f)
+            val x = (anchorX + rng.nextGaussian().toFloat() * clusterSpread).coerceIn(100f, 900f)
+            val y = (anchorY + rng.nextGaussian().toFloat() * clusterSpread).coerceIn(100f, 900f)
             Food(i, x, y)
         }
     }
@@ -256,14 +256,6 @@ class Simulation(
             }
         }
 
-        val intent = a1weights.transferIntent
-        val intent2 = a2weights.transferIntent
-        for (i in 0 until intent.size) {
-            if (rng.nextFloat() < 0.5f) {
-                for (j in intent[i].indices) intent[i][j] = intent2[i][j]
-            }
-        }
-
         val output = a1weights.transferOutput
         val output2 = a2weights.transferOutput
         for (i in 0 until output.size) {
@@ -276,15 +268,12 @@ class Simulation(
         val x = spawnCoordinates[0].toFloat()
         val y = spawnCoordinates[1].toFloat()
         val hue = (if (rng.nextFloat() < 0.5f) a1.hue else a2.hue) ?: Color.WHITE
-        val weights = Cortex.WeightsPackage(
-            input, intent,
-            output
-        )
+        val weights = Cortex.WeightsPackage(input, output)
 
         val nextAgent = agents.first { it == null || !it.enabled }
         if (nextAgent == null) {
             val nn = Cortex(State.Index.COUNT, MOTION_INPUTS,MOVEMENT_AXIS,
-                OUTPUT_PAIRS, OUTPUT_PREDICTIONS)
+                OUTPUTS)
             agents[nextAgentIndex] = Agent(x, y, nextAgentIndex, hue, true, nn)
             agents[nextAgentIndex]!!.importWeights(weights)
             nextAgentIndex++

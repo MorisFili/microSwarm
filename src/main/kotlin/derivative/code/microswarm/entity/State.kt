@@ -257,7 +257,7 @@ object State {
                         hungryWithNoFoodAround +
                         targetedByTargetThreatUrgency +
                         dangerAxis
-                ) / 7f
+                )
         self.neurotransmitters[0] = adrenaline
 
 
@@ -276,7 +276,7 @@ object State {
                         socialWarmth +
                         crowdIsFamiliar * 0.5f +
                         feelingSated
-                ) / 5.5f
+                )
         self.neurotransmitters[1] = serotonin
 
         // ========= State Assignment Block =========
@@ -313,15 +313,26 @@ object State {
         state[Index.HUNGER] = hunger.coerceIn(0f, 1f)
         state[Index.POPULARITY] = localPopularity.coerceIn(-1f, 1f)
 
-        self.stateEMA[self.ownEnergyDelta] += ((self.energy - self.PRE_ENERGY_SNAP) * INV_MAX_ENERGY -
-                self.stateEMA[self.ownEnergyDelta]) * 0.2f
-        self.stateEMA[self.hostileDistDelta] += ((hostileDistance - self.PRE_HOSTILE_DIST) -
-                self.stateEMA[self.hostileDistDelta]) * 0.2f
-        self.stateEMA[self.groupStress] += ((1f - localAgentEnergyValue) -
-                self.stateEMA[self.groupStress]) * 0.1f
-        self.stateEMA[self.familiarRatio] +=
-            ((friendlyGroupSize * INV_COUNT[self.agentsInProximityCount.coerceAtLeast(1)]) -
-                    self.stateEMA[self.familiarRatio]) * 0.1f
+
+        var d0 = self.stateEMA[self.ownEnergyDelta]
+        d0 += ((self.energy - self.PRE_ENERGY_SNAP) * INV_MAX_ENERGY - d0) * 0.2f
+        if (abs(d0) < 1e-6f) d0 = 0f
+        self.stateEMA[self.ownEnergyDelta] = d0
+
+        var d1 = self.stateEMA[self.hostileDistDelta]
+        d1 += ((hostileDistance - self.PRE_HOSTILE_DIST) - d1) * 0.2f
+        if (abs(d1) < 1e-6f) d1 = 0f
+        self.stateEMA[self.hostileDistDelta] = d1
+
+        var d2 = self.stateEMA[self.groupStress]
+        d2 += ((1f - localAgentEnergyValue) - d2) * 0.1f
+        if (abs(d2) < 1e-6f) d2 = 0f
+        self.stateEMA[self.groupStress] = d2
+
+        var d3 = self.stateEMA[self.familiarRatio]
+        d3 += (friendlyGroupSize * INV_COUNT[self.agentsInProximityCount.coerceAtLeast(1)] - d3) * 0.1f
+        if (abs(d3) < 1e-6f) d3 = 0f
+        self.stateEMA[self.familiarRatio] = d3
 
         self.PRE_HOSTILE_DIST = hostileDistance
         self.PRE_ENERGY_SNAP = self.energy

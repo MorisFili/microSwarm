@@ -343,13 +343,16 @@ object Action {
 
             val prediction = self.output[CortexIndex.A_PREDICTION]
 
-            val error = ((neurotransmitters[1] - self.serotonin) - (neurotransmitters[0] - self.adrenaline)) - prediction
+            val delta = (neurotransmitters[1] - self.serotonin) - (neurotransmitters[0] - self.adrenaline)
 
+            val error = (delta - prediction).coerceIn(-1f, 1f)
 
+            val correction = if (self.committedActionIntent == self.bootstrappedActionIntent) delta
+            else abs(error) * sign(delta)
 
             if (abs(error) > self.actionWeightGate) {
                 self.predictionSignalUpdate(error, CortexIndex.A_PREDICTION)
-                actionWeightUpdates(self, error)
+                actionWeightUpdates(self, correction)
                 self.actionWeightGate = abs(error)
             }
             self.actionWeightGate -= 0.001f
@@ -367,59 +370,56 @@ object Action {
             val explorationChoice = exploration(self).random()
 
             val explorationChoiceMag = when (explorationChoice) {
-                1 -> self.output[CortexIndex.A_KILL] + self.output[CortexIndex.A_KILL + 1]
-                2 -> self.output[CortexIndex.A_MATE] + self.output[CortexIndex.A_MATE + 1]
-                3 -> self.output[CortexIndex.A_EAT] + self.output[CortexIndex.A_EAT + 1]
-                4 -> self.output[CortexIndex.A_SHARE] + self.output[CortexIndex.A_SHARE + 1]
-                5 -> self.output[CortexIndex.A_STEAL] + self.output[CortexIndex.A_STEAL + 1]
+                1 -> self.output[CortexIndex.A_KILL]
+                2 -> self.output[CortexIndex.A_MATE]
+                3 -> self.output[CortexIndex.A_EAT]
+                4 -> self.output[CortexIndex.A_SHARE]
+                5 -> self.output[CortexIndex.A_STEAL]
                 else -> 1f
             }
+
+            self.bootstrappedActionIntent = 0
 
             if (explorationChoiceMag < self.bootStrengthGate) {
 
                 when (explorationChoice) { // Exploratory signal injection
                     1 -> {
                         self.output[CortexIndex.A_KILL] = 0.5f
-                        self.output[CortexIndex.A_KILL + 1] = 0f
+                        self.bootstrappedActionIntent = 1
                     }
 
                     2 -> {
                         self.output[CortexIndex.A_MATE] = 0.5f
-                        self.output[CortexIndex.A_MATE + 1] = 0f
+                        self.bootstrappedActionIntent = 2
                     }
 
                     3 -> {
                         self.output[CortexIndex.A_EAT] = 0.5f
-                        self.output[CortexIndex.A_EAT + 1] = 0f
+                        self.bootstrappedActionIntent = 3
                     }
 
                     4 -> {
                         self.output[CortexIndex.A_SHARE] = 0.5f
-                        self.output[CortexIndex.A_SHARE + 1] = 0f
+                        self.bootstrappedActionIntent = 4
                     }
 
                     5 -> {
                         self.output[CortexIndex.A_STEAL] = 0.5f
-                        self.output[CortexIndex.A_STEAL + 1] = 0f
+                        self.bootstrappedActionIntent = 5
                     }
                 }
             }
 
             val KILL =
-                (self.output[CortexIndex.A_KILL] - self.output[CortexIndex.A_KILL + 1]).coerceIn(0.01f, 1f) *
-                        self.actionHabituation[1] * self.spatialIntentSalienceFactor(Intents.KILL)
+                self.output[CortexIndex.A_KILL] * self.actionHabituation[1] * self.intentSalienceFactor(Intents.KILL)
             val MATE =
-                (self.output[CortexIndex.A_MATE] - self.output[CortexIndex.A_MATE + 1]).coerceIn(0.01f, 1f) *
-                        self.actionHabituation[2] * self.spatialIntentSalienceFactor(Intents.MATE)
+                self.output[CortexIndex.A_MATE] * self.actionHabituation[2] * self.intentSalienceFactor(Intents.MATE)
             val EAT =
-                (self.output[CortexIndex.A_EAT] - self.output[CortexIndex.A_EAT + 1]).coerceIn(0.01f, 1f) *
-                        self.actionHabituation[3] * self.spatialIntentSalienceFactor(Intents.EAT)
+                self.output[CortexIndex.A_EAT] * self.actionHabituation[3] * self.intentSalienceFactor(Intents.EAT)
             val SHARE =
-                (self.output[CortexIndex.A_SHARE] - self.output[CortexIndex.A_SHARE + 1]).coerceIn(0.01f, 1f) *
-                        self.actionHabituation[4] * self.spatialIntentSalienceFactor(Intents.SHARE)
+                self.output[CortexIndex.A_SHARE] * self.actionHabituation[4] * self.intentSalienceFactor(Intents.SHARE)
             val STEAL =
-                (self.output[CortexIndex.A_STEAL] - self.output[CortexIndex.A_STEAL + 1]).coerceIn(0.01f, 1f) *
-                        self.actionHabituation[5] * self.spatialIntentSalienceFactor(Intents.STEAL)
+                self.output[CortexIndex.A_STEAL] * self.actionHabituation[5] * self.intentSalienceFactor(Intents.STEAL)
 
             val CHOICE = maxOf(KILL, MATE, EAT, SHARE, STEAL)
 
@@ -463,69 +463,38 @@ object Action {
 
         fun actionWeightUpdates(self: Cortex, error: Float) {
             // Contribution calculation for pairs excluding movement axis
-            for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END step 2) {
+            for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
 
                 if (self.eligibilityGate(i)) continue
-
-                val axisDirection = sign(self.output[i] - self.output[i + 1])
-                if (axisDirection != 0f) {
                     val contribution = self.calculateContribution(self.output[i].coerceIn(0f, 1f), skipGate = true)
-                    val contribution2 = self.calculateContribution(self.output[i + 1].coerceIn(0f, 1f), skipGate = true)
-                    self.actionOutputContribution[i] += contribution * axisDirection  * error
-                    self.actionOutputContribution[i + 1] += -contribution2 * axisDirection  * error
-                }
-            }
-
-
-            for (j in 0 until self.intentNeurons) {
-                val intentDPost = if (self.intent[j] > 0) 1f else 0.25f
-                var totalCorrection = 0f
-                for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
-                    totalCorrection += self.actionOutputContribution[i] * (self.outputWeights[i][j] + self.outputMemory[i][j])
-                }
-                self.actionIntentContribution[j] += totalCorrection * intentDPost *
-                        self.calculateContribution(self.intent[j], 0.1f)
+                    self.actionOutputContribution[i] += contribution * error
             }
 
 
             for (j in 0 until self.activityNeurons) {
-                val activityDPost = if (self.activity[j] > 0) 1f else 0.25f
+                val intentDPost = if (self.activity[j] > 0) 1f else 0.25f
                 var totalCorrection = 0f
-                for (i in 0 until self.intentNeurons) {
-                    totalCorrection += self.actionIntentContribution[i] * (self.weightsIntent[i][j] + self.memoryIntent[i][j])
+                for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
+                    totalCorrection += self.actionOutputContribution[i] * (self.outputWeights[i][j] + self.outputMemory[i][j])
                 }
-                self.actionActivityContribution[j] += totalCorrection * activityDPost *
+                self.actionActivityContribution[j] += totalCorrection * intentDPost *
                         self.calculateContribution(self.activity[j], 0.1f)
             }
 
 
+
             for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
                 if (self.eligibilityGate(i)) continue
-                for (j in 0 until self.intentNeurons) {
+                for (j in 0 until self.activityNeurons) {
                     val adaptiveWeightDecay =
                         self.adaptiveWeightDecay(self.outputMemory[i][j],
                             self.outputLayerDecayBase, self.outputLayerDecayMax)
-                    val delta = self.actionOutputContribution[i] * self.intent[j] * self.learningMultiplier
+                    val delta = self.actionOutputContribution[i] * self.activity[j] * self.learningMultiplier
                     self.outputMemory[i][j] = (self.outputMemory[i][j] * adaptiveWeightDecay + delta)
-                        .coerceIn(0f, self.maxMemory)
+                        .coerceIn(-self.maxMemory, self.maxMemory)
                     if (abs(self.outputMemory[i][j]) > 0f)
                         self.outputWeights[i][j] = (self.outputWeights[i][j] * self.convergenceRate) +
                                 ((1 - self.convergenceRate) * self.outputMemory[i][j])
-                }
-            }
-
-            for (i in 0 until self.intentNeurons) {
-                for (j in 0 until self.activityNeurons) {
-                    val adaptiveWeightDecay =
-                        self.adaptiveWeightDecay(self.memoryIntent[i][j],
-                            self.intentLayerDecayBase, self.intentLayerDecayMax)
-                    val delta = self.actionIntentContribution[i] * self.activity[j] * self.learningMultiplier
-                    self.memoryIntent[i][j] = (self.memoryIntent[i][j] * adaptiveWeightDecay + delta)
-                        .coerceIn(-self.maxMemory, self.maxMemory)
-                    if (abs(self.memoryIntent[i][j]) > 0f)
-                        self.weightsIntent[i][j] = (self.weightsIntent[i][j] * self.convergenceRate) +
-                                ((1 - self.convergenceRate) * self.memoryIntent[i][j])
-
                 }
             }
 
@@ -546,7 +515,6 @@ object Action {
 
 
             for (i in 0 until self.actionOutputContribution.size) self.actionOutputContribution[i] = 0f
-            for (i in 0 until self.actionIntentContribution.size) self.actionIntentContribution[i] = 0f
             for (i in 0 until self.actionActivityContribution.size) self.actionActivityContribution[i] = 0f
         }
 

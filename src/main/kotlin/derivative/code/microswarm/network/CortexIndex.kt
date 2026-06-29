@@ -16,23 +16,25 @@ object CortexIndex {
     // 24,25 ->   HEALTH -> (1) HIGHEST (-1) LOWEST
 
     const val A_KILL = 0
-    const val A_MATE = 2
-    const val A_EAT = 4
-    const val A_SHARE = 6
-    const val A_STEAL = 8
-    const val S_TARGET = 10
-    const val S_FOOD = 12
-    const val S_FRIEND = 14
-    const val S_UNFAMILIAR = 16
-    const val S_UNFRIENDLY = 18
-    const val P_SEX = 20
-    const val P_VALENCE = 22
-    const val P_HEALTH = 24
-    const val S_PREDICTION = 26
-    const val A_PREDICTION = 27
+    const val A_MATE = 1
+    const val A_EAT = 2
+    const val A_SHARE = 3
+    const val A_STEAL = 4
+    const val S_TARGET = 5
+    const val S_FOOD = 6
+    const val S_FRIEND = 7
+    const val S_UNFAMILIAR = 8
+    const val S_UNFRIENDLY = 9
+    const val P_SEX = 10
+    const val P_VALENCE = 11
+    const val P_HEALTH = 12
+    const val S_PREDICTION = 13
+    const val A_PREDICTION = 14
 
     const val ACTION_INDEX_START = A_KILL
-    const val ACTION_INDEX_END = A_STEAL + 1
+    const val ACTION_INDEX_END = A_STEAL
+    const val SPATIAL_INDEX_START = S_TARGET
+    const val SPATIAL_INDEX_END = S_UNFRIENDLY
 
 }
 
