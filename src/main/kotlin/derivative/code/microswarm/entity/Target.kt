@@ -1,8 +1,10 @@
 package derivative.code.microswarm.entity
 
 import derivative.code.microswarm.ACTION_RADIUS
+import derivative.code.microswarm.INV_MAX_ENERGY
 import derivative.code.microswarm.INV_TARGET_RADIUS
 import derivative.code.microswarm.TARGET_RADIUS
+import derivative.code.microswarm.entity.State.Index
 import derivative.code.microswarm.network.OutputIndex
 import kotlin.math.abs
 import kotlin.math.max
@@ -12,7 +14,7 @@ import kotlin.math.sign
 object Target {
 
     fun selectTarget(self: Agent) {
-
+        self.targetBySelection = false
         if (self.targetCooldown > 0) return
 
         // 20,21 ->   SEX -> (1) OPPOSITE (-1) SAME
@@ -78,20 +80,58 @@ object Target {
         // Self defense preference
         if (closestTargetedBy != null) {
             setTarget(self, closestTargetedBy)
-            return
-        }
-
-        if (pickedTarget != null) {
-            setTarget(self, pickedTarget)
-            return
-        }
-
-        if (closestTarget != null) {
+        } else if (pickedTarget != null) {
+            self.targetBySelection = setTarget(self, pickedTarget)
+        } else if (closestTarget != null) {
             setTarget(self, closestTarget)
         }
 
-        if (self.TARGET != null) self.targetPopularity = self.TARGET!!.localPopularity
-        else self.targetPopularity = 0f
+        refreshTargetInfo(self)
+
+    }
+
+    fun refreshTargetInfo(self: Agent) {
+        val localTargetPointer = self.TARGET
+
+        if (localTargetPointer == null || !localTargetPointer.enabled ||
+            cheapDistance(self, localTargetPointer) > TARGET_RADIUS) {
+            clearTarget(self)
+            return
+        }
+
+        val targetDX = (localTargetPointer.x - self.x) * INV_TARGET_RADIUS
+        val targetDY = (localTargetPointer.y - self.y) * INV_TARGET_RADIUS
+        self.metaData[9] = targetDX * -self.facingY + targetDY * self.facingX
+        self.metaData[10] = targetDX * self.facingX + targetDY * self.facingY
+        val targetDistance = cheapDistance(self, localTargetPointer) * INV_TARGET_RADIUS
+        self.targetDistance = targetDistance
+        self.metaData[11] = targetDistance
+        val targetValence = getTargetValence(self, localTargetPointer.id)
+        self.withinActionRadius = actionRadiusCheck(self, self.TARGET)
+        val threatFromTarget = run {
+            val valence = if (targetValence < 0) abs(targetValence) else 0f
+            val huntingMe = if (self.targetedBy.any { it === localTargetPointer }) 1f else 0f
+            (huntingMe * valence).coerceIn(0f, 1f)
+        }
+
+        self.metaData[16] = threatFromTarget
+        self.hostileDistance = if (threatFromTarget > 0) targetDistance else 0f
+        val targetPopularity = localTargetPointer.localPopularity
+        val targetHunger = 1 - (localTargetPointer.energy * INV_MAX_ENERGY)
+
+
+        self.currentState[Index.TARGET_DIST] = targetDistance.coerceIn(0f, 1f)
+        self.currentState[Index.TARGET_HUE] = if (localTargetPointer.hue == self.hue) 1f else -1f
+        self.currentState[Index.TARGET_SEX] = if (localTargetPointer.isMale != self.isMale) 1f else -1f
+        self.currentState[Index.TARGET_VALENCE] = targetValence.coerceIn(-1f, 1f)
+        self.currentState[Index.TARGET_IS_INCUB] = if (localTargetPointer.INCUBATING) -1f else 1f
+        self.currentState[Index.TARGET_POPULARITY] = targetPopularity.coerceIn(0f, 1f)
+        self.currentState[Index.TARGET_HUNGER] = targetHunger.coerceIn(0f, 1f)
+        self.currentState[Index.TARGET_THREAT] = threatFromTarget.coerceIn(0f, 1f)
+        self.currentState[Index.WITHIN_ACTION_RADIUS] = if (self.withinActionRadius) 1f else 0f
+
+        self.targetPopularity = localTargetPointer.localPopularity
+
     }
 
 
@@ -175,28 +215,53 @@ object Target {
         } else return false
     }
 
-    fun setTarget(self: Agent, target: Agent?) {
+    fun setTarget(self: Agent, target: Agent?): Boolean {
         if (self.TARGET != null) clearTarget(self)
-        self.TARGET = target ?: return
-        self.withinActionRadius = actionRadiusCheck(self, target)
+        self.TARGET = target ?: return false
         for (i in 0 until target.targetedBy.size) {
             if (target.targetedBy[i] == null) {
                 target.targetedBy[i] = self
-                return
+                return true
             }
         }
         self.TARGET = null
+        resetTargetInfo(self)
+        return false
     }
 
     fun clearTarget(self: Agent) {
         val target = self.TARGET ?: return
+        resetTargetInfo(self)
         for (i in 0 until target.targetedBy.size) {
             if (target.targetedBy[i] === self) {
                 target.targetedBy[i] = null
-                self.TARGET = null
-                self.withinActionRadius = false
+                break
             }
         }
+        self.TARGET = null
+        resetTargetInfo(self)
+    }
+
+    private fun resetTargetInfo(self: Agent) {
+        // Target state reset
+        self.targetPopularity = 0f
+        self.targetDistance = 0f
+        self.hostileDistance = 0f
+        self.withinActionRadius = false
+        self.targetPopularity = 0f
+        self.currentState[Index.TARGET_DIST] = 0f
+        self.currentState[Index.TARGET_HUE] = 0f
+        self.currentState[Index.TARGET_SEX] = 0f
+        self.currentState[Index.TARGET_VALENCE] = 0f
+        self.currentState[Index.TARGET_IS_INCUB] = 0f
+        self.currentState[Index.TARGET_POPULARITY] = 0f
+        self.currentState[Index.TARGET_HUNGER] = 0f
+        self.currentState[Index.TARGET_THREAT] = 0f
+        self.currentState[Index.WITHIN_ACTION_RADIUS] = 0f
+        self.metaData[9] = 0f
+        self.metaData[10] = 0f
+        self.metaData[11] = 0f
+        self.metaData[16] = 0f
     }
 
     fun cheapDistance(a: Agent, b: Entity): Float {

@@ -23,6 +23,9 @@ val cosTable = FloatArray(TABLE_SIZE) { cos((it.toDouble() / TABLE_SIZE - 0.5) *
 val acosTable = FloatArray(TABLE_SIZE) { (acos(it.toDouble() / (TABLE_SIZE - 1) * 2.0 - 1.0) / PI).toFloat() }
 
 
+
+
+
 // Limiting variables
 const val PRESENCE_CAP = 50
 const val DETECTION_RADIUS = 40f

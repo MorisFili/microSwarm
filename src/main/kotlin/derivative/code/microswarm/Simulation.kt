@@ -24,7 +24,7 @@ class Simulation(
     // Grid Settings
     companion object {
         val rng = Random()
-        val MAX_ENTITY_COUNT = 5000
+        val MAX_ENTITY_COUNT = 2500
         val INITIAL_ENTITY_COUNT = 1000
 
         val palette = arrayOf( // Reserved: green = resource fields, red = renegades
@@ -40,7 +40,7 @@ class Simulation(
         const val MAX_PER_CELL = 2500 // maximum, tweak later
         const val MOTION_INPUTS = 2
         const val MOVEMENT_AXIS = 2
-        const val OUTPUTS = 15
+        const val OUTPUTS = 14
 
         val gridCellCount = Array(CELLS_PER_ROW) { IntArray(CELLS_PER_COLUMN) }
         val entityGrid = Array(CELLS_PER_ROW) {
@@ -130,12 +130,33 @@ class Simulation(
             var index = 0
             futures.clear()
 
-            // Sync phase
-            for (i in 0 until activeAgentsCount) {
-                activeAgents[i]!!.syncGenerateIntent()
-            }
 
             // Async phase
+            while (index < activeAgentsCount) {
+                val from = index
+                val to = minOf(from + chunkSize, activeAgentsCount)
+                futures += threads.submit {
+                    var i = from
+                    while (i < to) {
+                        activeAgents[i]!!.asyncGenerateEnvironment()
+                        i++
+                    }
+                }
+                index = to
+            }
+
+            for (future in futures) future.get()
+
+
+
+            // Sync phase
+            for (i in 0 until activeAgentsCount) {
+                activeAgents[i]!!.syncTargetSelection()
+            }
+
+
+            // Async phase
+            index = 0
             while (index < activeAgentsCount) {
                 val from = index
                 val to = minOf(from + chunkSize, activeAgentsCount)
@@ -154,6 +175,7 @@ class Simulation(
             // Sync phase
             for (i in 0 until activeAgentsCount) {
                 val agent = activeAgents[i]!!
+                if (!agent.enabled) continue
                 agent.syncPerformAction()
                 if (agent.MATE_CONDITION) {
                     if (Main.populationCounter.get() <= MAX_ENTITY_COUNT * 99 / 100) {
@@ -175,8 +197,11 @@ class Simulation(
                 futures += threads.submit {
                     var i = from
                     while (i < to) {
-                        activeAgents[i]!!.asyncStateEvaluation()
-                        if (memoryDecay) activeAgents[i]!!.memoryDecay()
+                        val agent = activeAgents[i]!!
+                        if (agent.enabled) {
+                            agent.asyncStateEvaluation()
+                            if (memoryDecay) activeAgents[i]!!.memoryDecay()
+                        }
                         i++
                     }
                 }
@@ -190,7 +215,8 @@ class Simulation(
             for (entity in agents) {
                 if (entity == null) continue
                 if (!entity.enabled) continue
-                entity.syncGenerateIntent()
+                entity.asyncGenerateEnvironment()
+                entity.syncTargetSelection()
                 entity.asyncFeedForward()
                 entity.syncPerformAction()
                 if (entity.MATE_CONDITION) {

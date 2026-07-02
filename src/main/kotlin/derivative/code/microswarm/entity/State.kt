@@ -11,7 +11,6 @@ import derivative.code.microswarm.INV_TARGET_RADIUS
 import derivative.code.microswarm.MAX_ENERGY
 import derivative.code.microswarm.Simulation.Companion.rng
 import derivative.code.microswarm.TABLE_SIZE
-import derivative.code.microswarm.TARGET_RADIUS
 import derivative.code.microswarm.acosTable
 import derivative.code.microswarm.cosTable
 import derivative.code.microswarm.network.OutputIndex
@@ -22,7 +21,7 @@ import kotlin.math.sign
 
 object State {
 
-    fun generateState(self: Agent, state: FloatArray) {
+    fun generateEnvironmentState(self: Agent, state: FloatArray) {
         self.friendsInProximityCount = 0
 
         // ========= Sense of Urgency Block =========
@@ -39,15 +38,6 @@ object State {
         }
 
         // ========= Target & Environment Sensing Block =========
-
-        // Target clearing logic
-        if (self.targetCooldown > 0) Target.clearTarget(self)
-        val target = self.TARGET // Local pointer
-        if (target != null && !target.enabled) Target.clearTarget(self) // Clear valid but disabled target
-        if (target != null) { // Old target that went out of range
-            val targetDist = Target.cheapDistance(self, target)
-            if (targetDist > TARGET_RADIUS) Target.clearTarget(self)
-        }
 
         // Local agent analysis logic
         var friendlyX = 0f
@@ -97,8 +87,6 @@ object State {
 
         }
 
-        self.withinActionRadius = Target.actionRadiusCheck(self, self.TARGET)
-
         // Local resource analysis logic
         var foodValueInProximity = 0f
         var closestFood: Food? = null
@@ -143,6 +131,7 @@ object State {
             }
         }
         foodValueInProximity *= INV_COUNT[self.foodInProximityCount] // Avg food value
+        self.foodValueInProximity = foodValueInProximity
         self.recognizedFoodCount = self.foodInProximityCount
 
         // Crude gate that checks both for proximity and availability
@@ -159,7 +148,7 @@ object State {
             if (friendlyCount > 0) friendlyY * INV_COUNT[friendlyCount] * INV_DETECTION_RADIUS else 0f
         self.metaData[0] = friendlyAvgDX * -self.facingY + friendlyAvgDY * self.facingX
         self.metaData[1] = friendlyAvgDX * self.facingX + friendlyAvgDY * self.facingY
-        val friendlyGroupSize = friendlyCount / GROUP_SIZE
+        self.friendlyGroupSize = friendlyCount / GROUP_SIZE
         val friendlyDistance = if (friendlyCount > 0) Target.cheapDistance(friendlyAvgDX, friendlyAvgDY) else 0f
         self.metaData[2] = friendlyDistance
 
@@ -190,25 +179,6 @@ object State {
         } else 0f
         self.metaData[8] = unfriendlyDistance
 
-        // Target
-        val targetDX = if (target != null) (target.x - self.x) * INV_TARGET_RADIUS else 0f
-        val targetDY = if (target != null) (target.y - self.y) * INV_TARGET_RADIUS else 0f
-        self.metaData[9] = targetDX * -self.facingY + targetDY * self.facingX
-        self.metaData[10] = targetDX * self.facingX + targetDY * self.facingY
-        self.targetDistance = if (target != null) Target.cheapDistance(self, target) * INV_TARGET_RADIUS else 0f
-        self.metaData[11] = self.targetDistance
-        val targetValence = if (target != null) Target.getTargetValence(self, target.id) else 0f
-        val targetPopularity = if (target != null) target.localPopularity else 0f
-        val targetHunger = if (target != null) 1 - (target.energy * INV_MAX_ENERGY) else 0f
-
-        val threatFromTarget = if (target != null) {
-            val valence = if (targetValence < 0) abs(targetValence) else 0f
-            val huntingMe = if (self.targetedBy.any { it === target }) 1f else 0f
-            (huntingMe * valence).coerceIn(0f, 1f)
-        } else 0f
-        self.metaData[16] = threatFromTarget
-        val hostileDistance = if (threatFromTarget > 0) self.targetDistance else 0f
-
         // Resources
         val resourceDX = if (closestFood != null) (closestFood.x - self.x) * INV_DETECTION_RADIUS else 0f
         val resourceDY = if (closestFood != null) (closestFood.y - self.y) * INV_DETECTION_RADIUS else 0f
@@ -223,17 +193,71 @@ object State {
         val hunger = (1 - (self.energy / MAX_ENERGY)).coerceIn(0f, 1f)
         val immediateThreat = acuteScore.coerceIn(0f, 1f)
         val crowdingState = self.agentsInProximityCount * INV_PRESENCE_CAP
-        val threatState = ((unfriendlyCenterStrength * unfriendlyDistance) + immediateThreat).coerceIn(0f, 1f)
+        self.threatState = ((unfriendlyCenterStrength * unfriendlyDistance) + immediateThreat).coerceIn(0f, 1f)
         val localPopularity = self.localPopularity * INV_COUNT[self.agentsInProximityCount]
-        val localAgentEnergyValue = if (self.agentsInProximityCount > 0)
+        self.localAgentEnergyValue = if (self.agentsInProximityCount > 0)
             crowdEnergy * INV_COUNT[self.agentsInProximityCount] * 0.01f else 0f
 
-        // Salience - biologically hardcoded through evolution.
-        // Part physical law, part me imposing value judgment
-        // Very gray area, keep for now. But is not true "emergent behavior"
+
+
+
+
+
+
+        // ========= State Assignment Block =========
+        // same hue group coordination
+        state[Index.FRIEND_DIST] = friendlyDistance.coerceIn(0f, 1f)
+        state[Index.FRIEND_GROUP_SIZE] = self.friendlyGroupSize.coerceIn(0f, 1f)
+        // other hue group coordination
+        state[Index.UNFAM_DIST] = unFamiliarDistance.coerceIn(0f, 1f)
+        state[Index.UNFAM_SIZE] = unFamiliarGroupSize.coerceIn(0f, 1f)
+        // renegade group coordination
+        state[Index.HOSTILE_DIST] = unfriendlyDistance.coerceIn(0f, 1f)
+        state[Index.HOSTILE_STR] = unfriendlyCenterStrength.coerceIn(0f, 1f)
+        // resource coordination
+        state[Index.RESOURCE_DIST] = resourceDistance.coerceIn(0f, 1f)
+        state[Index.RESOURCE_DENSITY] = foodAvailability.coerceIn(0f, 1f)
+        // global environmental && self
+        state[Index.IN_FOOD_FIELD] = if (self.foodField != null) 1f else 0f
+        state[Index.CROWDING] = crowdingState.coerceIn(-1f, 1f)
+        state[Index.THREAT] = self.threatState.coerceIn(-1f, 1f)
+        state[Index.IS_INCUBATING] = if (self.INCUBATING) 1f else 0f
+        state[Index.HUNGER] = hunger.coerceIn(0f, 1f)
+        state[Index.POPULARITY] = localPopularity.coerceIn(-1f, 1f)
+
+    }
+
+    fun updateTransmitters(self: Agent) {
+        val foodAvailability = self.foodValueInProximity
+        val hunger = (1 - (self.energy / MAX_ENERGY)).coerceIn(0f, 1f)
         val mattersLessWhenHungry = (1 - hunger) * (1 - hunger)
         val hungryWithNoFoodAround = hunger * (1f - foodAvailability.coerceIn(0f, 1f))
-        val hungryWithFoodAround = hunger * foodAvailability.coerceIn(0f, 1f)
+        // val hungryWithFoodAround = hunger * foodAvailability.coerceIn(0f, 1f)
+        val localPopularity = self.localPopularity * INV_COUNT[self.agentsInProximityCount]
+
+        var d0 = self.stateEMA[self.ownEnergyDelta]
+        d0 += ((self.energy - self.PRE_ENERGY_SNAP) * INV_MAX_ENERGY - d0) * 0.2f
+        if (abs(d0) < 1e-6f) d0 = 0f
+        self.stateEMA[self.ownEnergyDelta] = d0
+
+        var d1 = self.stateEMA[self.hostileDistDelta]
+        d1 += ((self.hostileDistance - self.PRE_HOSTILE_DIST) - d1) * 0.2f
+        if (abs(d1) < 1e-6f) d1 = 0f
+        self.stateEMA[self.hostileDistDelta] = d1
+
+        var d2 = self.stateEMA[self.groupStress]
+        d2 += ((1f - self.localAgentEnergyValue) - d2) * 0.1f
+        if (abs(d2) < 1e-6f) d2 = 0f
+        self.stateEMA[self.groupStress] = d2
+
+        var d3 = self.stateEMA[self.familiarRatio]
+        d3 += (self.friendlyGroupSize * INV_COUNT[self.agentsInProximityCount.coerceAtLeast(1)] - d3) * 0.1f
+        if (abs(d3) < 1e-6f) d3 = 0f
+        self.stateEMA[self.familiarRatio] = d3
+
+        self.PRE_HOSTILE_DIST = self.hostileDistance
+        self.PRE_ENERGY_SNAP = self.energy
+
         val ownEnergyDelta = self.stateEMA[self.ownEnergyDelta]
         val hostileDistDelta = self.stateEMA[self.hostileDistDelta]
         val groupStress = self.stateEMA[self.groupStress]
@@ -245,8 +269,8 @@ object State {
         val groupIsStressed = groupStress.coerceIn(0f, 1f)
         val socialHostility = max(0f, -localPopularity)
         val crowdIsUnfamiliar = (1f - familiarRatio).coerceIn(0f, 1f)
-        val targetedByTargetThreatUrgency = threatFromTarget * (1f - self.targetDistance).coerceIn(0f, 1f)
-        val dangerAxis = threatState.coerceIn(0f, 1f)
+        val targetedByTargetThreatUrgency = self.metaData[16] * (1f - self.targetDistance).coerceIn(0f, 1f)
+        val dangerAxis = self.threatState.coerceIn(0f, 1f)
 
         val adrenaline = (
                 energyFalling +
@@ -278,64 +302,6 @@ object State {
                         feelingSated
                 )
         self.neurotransmitters[1] = serotonin
-
-        // ========= State Assignment Block =========
-        // same hue group coordination
-        state[Index.FRIEND_DIST] = friendlyDistance.coerceIn(0f, 1f)
-        state[Index.FRIEND_GROUP_SIZE] = friendlyGroupSize.coerceIn(0f, 1f)
-        // other hue group coordination
-        state[Index.UNFAM_DIST] = unFamiliarDistance.coerceIn(0f, 1f)
-        state[Index.UNFAM_SIZE] = unFamiliarGroupSize.coerceIn(0f, 1f)
-        // renegade group coordination
-        state[Index.HOSTILE_DIST] = unfriendlyDistance.coerceIn(0f, 1f)
-        state[Index.HOSTILE_STR] = unfriendlyCenterStrength.coerceIn(0f, 1f)
-        // resource coordination
-        state[Index.RESOURCE_DIST] = resourceDistance.coerceIn(0f, 1f)
-        state[Index.RESOURCE_DENSITY] = foodAvailability.coerceIn(0f, 1f)
-        // target coordination
-        state[Index.TARGET_DIST] = self.targetDistance.coerceIn(0f, 1f)
-        // target perception
-        state[Index.TARGET_HUE] = if (target == null) 0f else if (target.hue == self.hue) 1f else -1f
-        state[Index.TARGET_SEX] = if (target == null) 0f else if (target.isMale != self.isMale) 1f else -1f
-        state[Index.TARGET_VALENCE] =
-            if (target == null) 0f else targetValence.coerceIn(-1f, 1f) // target relationship
-        state[Index.TARGET_IS_INCUB] = if (target == null) 0f else if (target.INCUBATING) -1f else 1f
-        state[Index.TARGET_POPULARITY] =
-            if (target == null) 0f else targetPopularity.coerceIn(0f, 1f) // local social standing
-        state[Index.TARGET_HUNGER] = targetHunger.coerceIn(0f, 1f)
-        state[Index.TARGET_THREAT] = threatFromTarget.coerceIn(0f, 1f)
-        // global environmental && self
-        state[Index.WITHIN_ACTION_RADIUS] = if (self.withinActionRadius) 1f else 0f
-        state[Index.IN_FOOD_FIELD] = if (self.foodField != null) 1f else 0f
-        state[Index.CROWDING] = crowdingState.coerceIn(-1f, 1f)
-        state[Index.THREAT] = threatState.coerceIn(-1f, 1f)
-        state[Index.IS_INCUBATING] = if (self.INCUBATING) 1f else 0f
-        state[Index.HUNGER] = hunger.coerceIn(0f, 1f)
-        state[Index.POPULARITY] = localPopularity.coerceIn(-1f, 1f)
-
-
-        var d0 = self.stateEMA[self.ownEnergyDelta]
-        d0 += ((self.energy - self.PRE_ENERGY_SNAP) * INV_MAX_ENERGY - d0) * 0.2f
-        if (abs(d0) < 1e-6f) d0 = 0f
-        self.stateEMA[self.ownEnergyDelta] = d0
-
-        var d1 = self.stateEMA[self.hostileDistDelta]
-        d1 += ((hostileDistance - self.PRE_HOSTILE_DIST) - d1) * 0.2f
-        if (abs(d1) < 1e-6f) d1 = 0f
-        self.stateEMA[self.hostileDistDelta] = d1
-
-        var d2 = self.stateEMA[self.groupStress]
-        d2 += ((1f - localAgentEnergyValue) - d2) * 0.1f
-        if (abs(d2) < 1e-6f) d2 = 0f
-        self.stateEMA[self.groupStress] = d2
-
-        var d3 = self.stateEMA[self.familiarRatio]
-        d3 += (friendlyGroupSize * INV_COUNT[self.agentsInProximityCount.coerceAtLeast(1)] - d3) * 0.1f
-        if (abs(d3) < 1e-6f) d3 = 0f
-        self.stateEMA[self.familiarRatio] = d3
-
-        self.PRE_HOSTILE_DIST = hostileDistance
-        self.PRE_ENERGY_SNAP = self.energy
     }
 
     fun intentToSpatialTransformation(self: Agent, state: FloatArray) {
@@ -410,7 +376,7 @@ object State {
             }
         }
 
-        if (self.networkAccess().committedSpatialIntent != 0 && !invalidTarget) {
+        if (selectedIntent != 0 && !invalidTarget) {
 
             // Intent translation
             var steerX = (intentTarget * targetX) + (intentFood * resourceX) +
@@ -472,6 +438,8 @@ object State {
                     }
                 }
             }
+
+            self.networkAccess().committedSpatialIntent = 0
 
             // Out of range check
             val distance = Target.cheapDistance(self.explorationTargetX - self.x, self.explorationTargetY - self.y)
@@ -548,6 +516,20 @@ object State {
         const val IS_INCUBATING = 20
         const val HUNGER = 21
         const val POPULARITY = 22
+
+        // Feedback
+        const val A_KILL = 23
+        const val A_MATE = 24
+        const val A_EAT = 25
+        const val A_SHARE = 26
+        const val A_STEAL = 27
+        const val S_TARGET = 28
+        const val S_FOOD = 29
+        const val S_FRIEND = 30
+        const val S_UNFAMILIAR = 31
+        const val P_SEX = 32
+        const val P_VALENCE = 33
+        const val P_HEALTH = 34
 
 
         val COUNT = Index::class.java.declaredFields.count { it.type == Int::class.java }

@@ -22,7 +22,7 @@ class Cortex(
     val inputNeurons = inputStates
     val activityNeurons = inputStates
     private val outputNeurons = outputs
-    var learningMultiplier = 1f
+    var learningRate = 0.01f
     val locomotionLearningRate = 0.06f
     val convergenceRate = 0.9999f
     val maxMemory = 2.0f
@@ -35,8 +35,7 @@ class Cortex(
     // Decay rates
     private val INV_DECAY_SCALE = 1f / 0.3f // decay scale = magnitude of weight at which bigger decay kicks in
     val weightDecay = 0.9999f
-    private val eligibilityConvergenceRate = 0.9f
-    private val eligibilityConvergenceGate = 0.2f
+    private val eligibilityDecay = 0.99f
     val outputLayerDecayBase = weightDecay
     val outputLayerDecayMax = 0.9f
 
@@ -79,13 +78,16 @@ class Cortex(
         Array(outputNeurons) { FloatArray(activityNeurons) }
 
     // Rolling Variables
-    val stateInputs = FloatArray(inputNeurons)
+    val predictionStateInputs = FloatArray(inputNeurons)
+    val intentStateInputs = FloatArray(inputNeurons)
+    val preferenceStateInputs = FloatArray(inputNeurons)
     val activity = FloatArray(activityNeurons)
+    val preferenceActivity = FloatArray(activityNeurons)
+    val predictionActivity = FloatArray(activityNeurons)
     val output = FloatArray(outputNeurons)
     val outputContribution = FloatArray(outputNeurons)
-    val activityContribution = FloatArray(activityNeurons)
-    val actionOutputContribution = FloatArray(outputNeurons)
-    val actionActivityContribution = FloatArray(activityNeurons)
+    val prefActivityContribution = FloatArray(activityNeurons)
+    val stateActivityContribution = FloatArray(activityNeurons)
     var actionEvaluation = false
     private var bootstrappedSpatialIntent = 0
     private var bootstrappedPref = -1
@@ -93,6 +95,8 @@ class Cortex(
     private var bootDuration = 50
     private var bootSignalStrength = 0.5f
     var bootStrengthGate = 0.2f
+    var actionExecuted = false
+    var targetBySelection = false
 
     // Temporal
     val foodMemoryRot = FloatArray(3) { Float.NaN }
@@ -113,19 +117,35 @@ class Cortex(
 
     fun generateIntent(stateInputArray: FloatArray, outputArray: FloatArray) {
 
-        for (i in 0 until inputNeurons) stateInputs[i] = stateInputArray[i] // Snapshot
+        for (i in 0 until stateInputArray.size) intentStateInputs[i] = stateInputArray[i]
+
+        // copy over previous ticks choices
+        intentStateInputs[State.Index.A_KILL] = predictionStateInputs[State.Index.A_KILL]
+        intentStateInputs[State.Index.A_MATE] = predictionStateInputs[State.Index.A_MATE]
+        intentStateInputs[State.Index.A_EAT] = predictionStateInputs[State.Index.A_EAT]
+        intentStateInputs[State.Index.A_SHARE] = predictionStateInputs[State.Index.A_SHARE]
+        intentStateInputs[State.Index.A_STEAL] = predictionStateInputs[State.Index.A_STEAL]
+        intentStateInputs[State.Index.S_TARGET] = predictionStateInputs[State.Index.S_TARGET]
+        intentStateInputs[State.Index.S_FOOD] = predictionStateInputs[State.Index.S_FOOD]
+        intentStateInputs[State.Index.S_FRIEND] = predictionStateInputs[State.Index.S_FRIEND]
+        intentStateInputs[State.Index.S_UNFAMILIAR] = predictionStateInputs[State.Index.S_UNFAMILIAR]
+        intentStateInputs[State.Index.P_SEX] = predictionStateInputs[State.Index.P_SEX]
+        intentStateInputs[State.Index.P_VALENCE] = predictionStateInputs[State.Index.P_VALENCE]
+        intentStateInputs[State.Index.P_HEALTH] = predictionStateInputs[State.Index.P_HEALTH]
+
+        for (i in 0 until stateInputArray.size) predictionStateInputs[i] = stateInputArray[i]
 
         for (i in 0 until activityNeurons) {
             var sum = activityBias[i]
             for (j in 0 until inputNeurons) {
                 val weight = weightsInput[i][j] + memoryIn[i][j]
-                sum += weight * stateInputs[j]
+                sum += weight * intentStateInputs[j]
             }
             // Leaky ReLU
             activity[i] = (if (sum > 0f) sum else sum * 0.25f)
         }
 
-        for (i in 0 until CortexIndex.S_PREDICTION) {
+        for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
             var sum = 0f
             for (j in 0 until activityNeurons) {
                 val weightsOI = outputWeights[i][j] + outputMemory[i][j]
@@ -134,21 +154,79 @@ class Cortex(
             output[i] = max(0f, sum)
         }
 
-        for (i in CortexIndex.S_PREDICTION until outputNeurons) {
+        for (i in CortexIndex.SPATIAL_INDEX_START until CortexIndex.P_SEX) {
             var sum = 0f
             for (j in 0 until activityNeurons) {
                 val weightsOI = outputWeights[i][j] + outputMemory[i][j]
                 sum += weightsOI * activity[j]
             }
-            output[i] = sum
+            output[i] = sum.coerceIn(-1f, 1f)
         }
 
 
         Action.Network.generateAction(this)
         generateSpatialIntent()
-        generatePreferences()
 
-        for (i in 0 until outputNeurons) outputArray[movementAxis + i] = output[i]
+        for (i in 0..CortexIndex.FEEDFORWARD_END) outputArray[movementAxis + i] = output[i]
+    }
+
+    fun generatePrediction(networkOutput: FloatArray, targetBySelection: Boolean) {
+        this.targetBySelection = targetBySelection
+
+        // Reset old actions
+        predictionStateInputs[State.Index.A_KILL] = 0f
+        predictionStateInputs[State.Index.A_MATE] = 0f
+        predictionStateInputs[State.Index.A_EAT] = 0f
+        predictionStateInputs[State.Index.A_SHARE] = 0f
+        predictionStateInputs[State.Index.A_STEAL] = 0f
+        predictionStateInputs[State.Index.S_TARGET] = 0f
+        predictionStateInputs[State.Index.S_FOOD] = 0f
+        predictionStateInputs[State.Index.S_FRIEND] = 0f
+        predictionStateInputs[State.Index.S_UNFAMILIAR] = 0f
+        predictionStateInputs[State.Index.P_SEX] = 0f
+        predictionStateInputs[State.Index.P_VALENCE] = 0f
+        predictionStateInputs[State.Index.P_HEALTH] = 0f
+
+        when (committedActionIntent) {
+            1 -> predictionStateInputs[State.Index.A_KILL] = 1f
+            2 -> predictionStateInputs[State.Index.A_MATE] = 1f
+            3 -> predictionStateInputs[State.Index.A_EAT] = 1f
+            4 -> predictionStateInputs[State.Index.A_SHARE] = 1f
+            5 -> predictionStateInputs[State.Index.A_STEAL] = 1f
+        }
+
+        when (committedSpatialIntent) {
+            1 -> predictionStateInputs[State.Index.S_TARGET] = 1f * sign(output[CortexIndex.S_TARGET])
+            2 -> predictionStateInputs[State.Index.S_FOOD] = 1f * sign(output[CortexIndex.S_FOOD])
+            3 -> predictionStateInputs[State.Index.S_FRIEND] = 1f * sign(output[CortexIndex.S_FRIEND])
+            4 -> predictionStateInputs[State.Index.S_UNFAMILIAR] = 1f * sign(output[CortexIndex.S_UNFAMILIAR])
+        }
+
+        if (targetBySelection) {
+            predictionStateInputs[State.Index.P_SEX] = 1f * sign(output[CortexIndex.P_SEX])
+            predictionStateInputs[State.Index.P_VALENCE] = 1f * sign(output[CortexIndex.P_VALENCE])
+            predictionStateInputs[State.Index.P_HEALTH] = 1f * sign(output[CortexIndex.P_HEALTH])
+        }
+
+        for (i in 0 until activityNeurons) {
+            var sum = activityBias[i]
+            for (j in 0 until inputNeurons) {
+                val weight = weightsInput[i][j] + memoryIn[i][j]
+                sum += weight * predictionStateInputs[j]
+            }
+            // Leaky ReLU
+            predictionActivity[i] = (if (sum > 0f) sum else sum * 0.25f)
+        }
+
+        var sum = 0f
+        for (j in 0 until activityNeurons) {
+            val weightsOI = outputWeights[CortexIndex.S_PREDICTION][j] +
+                    outputMemory[CortexIndex.S_PREDICTION][j]
+            sum += weightsOI * predictionActivity[j]
+        }
+        output[CortexIndex.S_PREDICTION] = sum.coerceIn(-1f, 1f)
+        networkOutput[OutputIndex.S_PREDICTION] = output[CortexIndex.S_PREDICTION]
+
     }
 
 
@@ -165,15 +243,15 @@ class Cortex(
         // 16,17 -> UNFAMILIAR (4)
         // 18,19 -> DANGER <-- stays non-flattened
 
-        val hungerSq = if (stateInputs[State.Index.HUNGER] > 0.4f)
-            stateInputs[State.Index.HUNGER] * stateInputs[State.Index.HUNGER] else 0f
-        val foodScarcity = 1 - stateInputs[State.Index.RESOURCE_DENSITY]
+        val hungerSq = if (predictionStateInputs[State.Index.HUNGER] > 0.4f)
+            predictionStateInputs[State.Index.HUNGER] * predictionStateInputs[State.Index.HUNGER] else 0f
+        val foodScarcity = 1 - predictionStateInputs[State.Index.RESOURCE_DENSITY]
         val explorationUrgency = hungerSq * foodScarcity
 
-        val foodInProximity = stateInputs[State.Index.RESOURCE_DIST] > 0
-        val friendInProximity = stateInputs[State.Index.FRIEND_DIST] > 0
-        val unfamiliarInProximity = stateInputs[State.Index.UNFAM_DIST] > 0
-        val targetInProximity = friendInProximity || unfamiliarInProximity || stateInputs[State.Index.HOSTILE_DIST] > 0
+        val foodInProximity = predictionStateInputs[State.Index.RESOURCE_DIST] > 0
+        val friendInProximity = predictionStateInputs[State.Index.FRIEND_DIST] > 0
+        val unfamiliarInProximity = predictionStateInputs[State.Index.UNFAM_DIST] > 0
+        val targetInProximity = friendInProximity || unfamiliarInProximity || predictionStateInputs[State.Index.HOSTILE_DIST] > 0
 
 
         val targetSignalStrength = abs(output[CortexIndex.S_TARGET])
@@ -303,7 +381,7 @@ class Cortex(
         if (bootstrapTimer > 0 && committedSpatialIntent != bootstrappedSpatialIntent) bootstrapTimer = 0
 
         for (i in 1..4) {
-            val starvingFoodBypass = i == 2 && stateInputs[State.Index.HUNGER] > 0.4f
+            val starvingFoodBypass = i == 2 && predictionStateInputs[State.Index.HUNGER] > 0.4f
             spatialHabituation[i] = when {
                 starvingFoodBypass -> 1f
                 i == committedSpatialIntent -> (spatialHabituation[i] * 0.996f).coerceAtLeast(0.3f)
@@ -314,12 +392,33 @@ class Cortex(
 
     }
 
-    private fun generatePreferences() {
+    fun generateTargetPreferences(stateInputArray: FloatArray, outputArray: FloatArray) {
         // Softmax-Argmax logic for Spatial Intent
         //
         // 20,21 ->   SEX -> (1) OPPOSITE (-1) SAME
         // 22,23 ->   VALENCE -> (1) POSITIVE (-1) NEGATIVE
         // 24,25 ->   HEALTH -> (1) HIGHEST (-1) LOWEST
+
+        for (i in 0 until stateInputArray.size) preferenceStateInputs[i] = stateInputArray[i]
+
+        for (i in 0 until activityNeurons) {
+            var sum = activityBias[i]
+            for (j in 0 until inputNeurons) {
+                val weight = weightsInput[i][j] + memoryIn[i][j]
+                sum += weight * stateInputArray[j]
+            }
+            // Leaky ReLU
+            preferenceActivity[i] = (if (sum > 0f) sum else sum * 0.25f)
+        }
+
+        for (i in CortexIndex.P_SEX..CortexIndex.P_HEALTH) {
+            var sum = 0f
+            for (j in 0 until activityNeurons) {
+                val weightsOI = outputWeights[i][j] + outputMemory[i][j]
+                sum += weightsOI * preferenceActivity[j]
+            }
+            output[i] = sum.coerceIn(-1f, 1f)
+        }
 
 
         // Noise gate
@@ -333,7 +432,9 @@ class Cortex(
 
         if (abs(healthPref) < 0.1f) output[CortexIndex.P_HEALTH] = 0f
 
-
+        outputArray[OutputIndex.SEX] = output[CortexIndex.P_SEX]
+        outputArray[OutputIndex.VALENCE] = output[CortexIndex.P_VALENCE]
+        outputArray[OutputIndex.HEALTH] = output[CortexIndex.P_HEALTH]
     }
 
     fun generateMovement(motorInputArray: FloatArray, outputArray: FloatArray) {
@@ -341,11 +442,12 @@ class Cortex(
     }
 
 
-    fun actionEvaluation(neurotransmitters: FloatArray) {
-        Action.Network.actionEvaluation(this, neurotransmitters)
+    fun actionEvaluation() {
+        Action.Network.actionEvaluation(this)
     }
 
-    var weightGate = 0.1f
+    var positiveWeightGate = 0.01f
+    var negativeWeightGate = 0.01f
     fun stateEvaluation(neurotransmitters: FloatArray) {
 
 
@@ -355,23 +457,28 @@ class Cortex(
 
         val delta = (neurotransmitters[1] - serotonin) - (neurotransmitters[0] - adrenaline)
 
-        val error = (delta - prediction).coerceIn(-1f, 1f)
-
-        val correction = if (committedSpatialIntent == bootstrappedSpatialIntent) delta
-        else abs(error) * sign(delta)
-
         adrenaline += (neurotransmitters[0] - adrenaline) * 0.1f
         if (abs(adrenaline) < 1e-6f) adrenaline = 0f
         serotonin += (neurotransmitters[1] - serotonin) * 0.1f
         if (abs(serotonin) < 1e-6f) serotonin = 0f
 
+        val error = (delta - prediction).coerceIn(-0.1f, 0.1f)
 
-        if (abs(error) > weightGate) {
-            predictionSignalUpdate(error, CortexIndex.S_PREDICTION)
-            weightAdjustment(correction)
-            weightGate = abs(error)
+        val weightCorrection = sign(delta) * abs(error) + error
+
+
+        val gate = if (delta >= 0) positiveWeightGate else negativeWeightGate
+
+        predictionSignalUpdate(error, CortexIndex.S_PREDICTION)
+        if (abs(error) > gate) {
+            weightAdjustment(weightCorrection)
+            if (delta >= 0f) positiveWeightGate = abs(error)
+            else negativeWeightGate = abs(error)
         }
-        weightGate = (weightGate - 0.001f).coerceIn(0.05f, 1f)
+        positiveWeightGate = (positiveWeightGate - 0.01f).coerceIn(0.01f, 1f)
+        negativeWeightGate = (negativeWeightGate - 0.01f).coerceIn(0.01f, 1f)
+
+        actionExecuted = false
     }
 
 
@@ -384,44 +491,59 @@ class Cortex(
 
         for (i in 0 until CortexIndex.S_PREDICTION) {
             if (eligibilityGate(i)) continue
-            outputContribution[i] += calculateContribution(output[i].coerceIn(0f, 1f), skipGate = true)
+            val y = output[i].coerceIn(-1f, 1f)
+            val mag = calculateContribution(y)
+            val contribution = if (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) mag
+            else sign(y) * mag
+            outputContribution[i] += contribution
         }
 
+        // Preferences
         for (j in 0 until activityNeurons) {
-            val activityDPost = if (activity[j] > 0) 1f else 0.25f
             var totalCorrection = 0f
-            for (i in 0 until CortexIndex.S_PREDICTION) {
+            val activityDPost = if (preferenceActivity[j] > 0) 1f else 0.25f
+            for (i in CortexIndex.P_SEX until CortexIndex.S_PREDICTION) {
                 totalCorrection += outputContribution[i] * (outputWeights[i][j] + outputMemory[i][j])
             }
-            activityContribution[j] += totalCorrection * activityDPost *
+            prefActivityContribution[j] += totalCorrection * activityDPost *
+                    calculateContribution(preferenceActivity[j], 0.1f)
+        }
+
+        for (i in CortexIndex.P_SEX until CortexIndex.S_PREDICTION) {
+            for (j in 0 until activityNeurons) {
+                eOut[i][j] = (eOut[i][j] * eligibilityDecay) + outputContribution[i] * preferenceActivity[j]
+            }
+        }
+
+        // States
+        for (j in 0 until activityNeurons) {
+            var totalCorrection = 0f
+            val activityDPost = if (activity[j] > 0) 1f else 0.25f
+            for (i in 0 until CortexIndex.P_SEX) {
+                totalCorrection += outputContribution[i] * (outputWeights[i][j] + outputMemory[i][j])
+            }
+            stateActivityContribution[j] += totalCorrection * activityDPost *
                     calculateContribution(activity[j], 0.1f)
         }
 
-        // Neuron-level eligibility traces
-        for (i in 0 until CortexIndex.S_PREDICTION) {
-            if (eligibilityGate(i)) continue
+        for (i in 0 until CortexIndex.P_SEX) {
             val post = outputContribution[i]
-            for (j in 0 until activityNeurons)
-                if (abs(eOut[i][j]) < eligibilityConvergenceGate) {
-                    eOut[i][j] += post * activity[j] * learningMultiplier
-                } else eOut[i][j] = (eOut[i][j] * eligibilityConvergenceRate) +
-                        (1f - eligibilityConvergenceRate) * post * activity[j] * learningMultiplier
+            for (j in 0 until activityNeurons) {
+                eOut[i][j] = (eOut[i][j] * eligibilityDecay) + post * activity[j]
+            }
         }
 
         for (j in 0 until activityNeurons) {
-            val post = activityContribution[j]
-            for (k in 0 until inputNeurons)
-                if (abs(eIn[j][k]) < eligibilityConvergenceGate) {
-                    eIn[j][k] += post * stateInputs[k] * learningMultiplier
-                } else eIn[j][k] = (eIn[j][k] * eligibilityConvergenceRate) +
-                        (1f - eligibilityConvergenceRate) * post * stateInputs[k] * learningMultiplier
-
+            for (k in 0 until inputNeurons) {
+                eIn[j][k] = (eIn[j][k] * eligibilityDecay) +
+                        stateActivityContribution[j] * intentStateInputs[k] +
+                        + prefActivityContribution[j] * preferenceStateInputs[k]
+            }
         }
 
-        learningMultiplier = 1f // reset to base
-
         for (i in 0 until output.size) outputContribution[i] = 0f
-        for (i in 0 until activityContribution.size) activityContribution[i] = 0f
+        for (i in 0 until stateActivityContribution.size) stateActivityContribution[i] = 0f
+        for (i in 0 until prefActivityContribution.size) prefActivityContribution[i] = 0f
 
 
     }
@@ -436,19 +558,19 @@ class Cortex(
                         outputMemory[i][j],
                         outputLayerDecayBase, outputLayerDecayMax
                     )
-                val delta = eOut[i][j] * error
+                val delta = eOut[i][j] * error * learningRate
                 outputMemory[i][j] = (outputMemory[i][j] * adaptiveWeightDecay + delta)
                     .coerceIn(-maxMemory, maxMemory)
                 if (abs(outputMemory[i][j]) > 0f)
-                outputWeights[i][j] = (outputWeights[i][j] * convergenceRate) +
-                        ((1 - convergenceRate) * outputMemory[i][j])
+                    outputWeights[i][j] = (outputWeights[i][j] * convergenceRate) +
+                            ((1 - convergenceRate) * outputMemory[i][j])
             }
         }
 
         for (j in 0 until activityNeurons) {
             for (k in 0 until inputNeurons) {
                 val adaptiveWeightDecay = weightDecay // 0.99985
-                val delta = eIn[j][k] * error
+                val delta = eIn[j][k] * error * learningRate
                 memoryIn[j][k] = (memoryIn[j][k] * adaptiveWeightDecay + delta)
                     .coerceIn(-maxMemory, maxMemory)
                 if (abs(memoryIn[j][k]) > 0f)
@@ -457,18 +579,6 @@ class Cortex(
 
             }
         }
-
-        for (i in 0 until eOut.size) {
-            for (j in 0 until eOut[i].size) {
-                eOut[i][j] = 0f
-            }
-        }
-        for (i in 0 until eIn.size) {
-            for (j in 0 until eIn[i].size) {
-                eIn[i][j] = 0f
-            }
-        }
-
     }
 
     fun predictionSignalUpdate(error: Float, predictionType: Int) {
@@ -479,36 +589,17 @@ class Cortex(
         outputContribution[i] = 1f
 
         for (j in 0 until activityNeurons) {
-            val intentDPost = if (activity[j] > 0) 1f else 0.25f
-            val totalCorrection = outputContribution[i] * (outputWeights[i][j] + outputMemory[i][j])
-            activityContribution[j] += totalCorrection * intentDPost *
-                    calculateContribution(activity[j], 0.1f)
-        }
-
-
-
-        for (j in 0 until activityNeurons) {
             val adaptiveWeightDecay =
                 adaptiveWeightDecay(
                     outputMemory[i][j],
                     outputLayerDecayBase, outputLayerDecayMax
                 )
-            val delta = outputContribution[i] * activity[j] * error
+            val delta = outputContribution[i] * predictionActivity[j] * error
             outputMemory[i][j] = (outputMemory[i][j] * adaptiveWeightDecay + delta)
                 .coerceIn(-maxMemory, maxMemory)
         }
 
-        for (j in 0 until activityNeurons) {
-            for (k in 0 until inputNeurons) {
-                val adaptiveWeightDecay = weightDecay // 0.99985
-                val delta = activityContribution[j] * stateInputs[k] * error
-                memoryIn[j][k] = (memoryIn[j][k] * adaptiveWeightDecay + delta)
-                    .coerceIn(-maxMemory, maxMemory)
-            }
-        }
-
         for (i in 0 until output.size) outputContribution[i] = 0f
-        for (i in 0 until activityContribution.size) activityContribution[i] = 0f
     }
 
     fun eligibilityGate(i: Int): Boolean {
@@ -528,22 +619,20 @@ class Cortex(
         if (isActionOutput != actionEvaluation) return true // Not updated this loop
 
         if (i == CortexIndex.S_PREDICTION) return true // Updated separately
-        if (i == CortexIndex.A_PREDICTION) return true // Updated separately
 
         if (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
+            if (!actionExecuted) return true
             val actionCommitIndex = 1 + i
             if (actionCommitIndex != committedActionIntent) return true // Skip all but committed
-            learningMultiplier = 1f
         }
 
         // Skip teaching target selection when not chasing target
         val isTargetSelection = i in CortexIndex.P_SEX..CortexIndex.P_HEALTH
-        if (isTargetSelection && committedSpatialIntent != 1) return true
+        if (isTargetSelection && !targetBySelection) return true
 
         if (i in CortexIndex.SPATIAL_INDEX_START..CortexIndex.SPATIAL_INDEX_END) { // Skip spatial intent that is not committed
             val spatialIntent = (i - 4)
             if (spatialIntent != committedSpatialIntent) return true
-            if (bootstrapTimer > 0 && bootstrappedSpatialIntent == spatialIntent) learningMultiplier = 1f
         }
 
         return false
@@ -557,14 +646,14 @@ class Cortex(
         val adrenalineNormalized = adrenaline / 7f
         val serotoninNormalized = serotonin / 5.5f
 
-        val hunger = stateInputs[State.Index.HUNGER] // hungry from 0 -> 1
+        val hunger = predictionStateInputs[State.Index.HUNGER] // hungry from 0 -> 1
         val hungerSq = hunger * hunger
         val sated = 1 - hunger
         val satedSq = sated * sated
-        val threat = stateInputs[State.Index.THREAT] // threatened from 0 -> 1
-        val target_threat = stateInputs[State.Index.TARGET_THREAT]
-        val target_hunger = stateInputs[State.Index.TARGET_HUNGER]
-        val target_valence = stateInputs[State.Index.TARGET_VALENCE]
+        val threat = predictionStateInputs[State.Index.THREAT] // threatened from 0 -> 1
+        val target_threat = predictionStateInputs[State.Index.TARGET_THREAT]
+        val target_hunger = predictionStateInputs[State.Index.TARGET_HUNGER]
+        val target_valence = predictionStateInputs[State.Index.TARGET_VALENCE]
 
         val value = when (intent) {
             Intents.KILL -> (target_threat * adrenalineNormalized) - serotoninNormalized
@@ -605,7 +694,7 @@ class Cortex(
 
 
     fun adaptiveWeightDecay(memoryValue: Float, decay: Float, maxDecay: Float): Float {
-        val memory = (memoryValue * INV_DECAY_SCALE).coerceIn(0f, 1f)
+        val memory = (abs(memoryValue) * INV_DECAY_SCALE).coerceIn(0f, 1f)
         val pressure = memory * memory * memory
         return decay + ((maxDecay - decay) * pressure)
     }
@@ -684,8 +773,20 @@ class Cortex(
             }
         }
 
+        for (i in 0 until eIn.size) {
+            for (j in 0 until eIn[i].size) {
+                eIn[i][j] = 0f
+            }
+        }
+        for (i in 0 until eOut.size) {
+            for (j in 0 until eOut[i].size) {
+                eOut[i][j] = 0f
+            }
+        }
+
         // Rolling variables
         actionEvaluation = false
+
     }
 
     private fun arrayBiasSeeder(array: FloatArray) {
@@ -704,6 +805,7 @@ class Cortex(
 
     private fun outputSeeder(outputMatrix: Array<FloatArray>) {
         for (i in 0 until outputNeurons) {
+            if (i == CortexIndex.S_PREDICTION) continue
             for (j in 0 until activityNeurons) {
                 outputMatrix[i][j] = rng.nextGaussian(0.0, 0.1)
                     .toFloat().coerceIn(-0.2f, 0.2f)
@@ -787,8 +889,6 @@ class Cortex(
         block.append("Truth: ${serotonin - adrenaline}\n")
         block.append("S_Prediction: ${outputs[OutputIndex.S_PREDICTION]}\n")
         block.append("S_Error: ${((neurotransmitters[1] - serotonin) - (neurotransmitters[0] - adrenaline)) - outputs[OutputIndex.S_PREDICTION]}\n")
-        block.append("A_Prediction: ${outputs[OutputIndex.A_PREDICTION]}\n")
-        block.append("A_Error: ${((neurotransmitters[1] - serotonin) - (neurotransmitters[0] - adrenaline)) - outputs[OutputIndex.A_PREDICTION]}\n")
         block.append("Serotonin: ${serotonin}\n")
         block.append("Adrenaline: ${adrenaline}\n")
         block.append("===== ================= =====\n")
@@ -835,8 +935,8 @@ class Cortex(
         if ((output[CortexIndex.S_UNFRIENDLY]) > 0)
             block.append("Approaching Danger\n") else block.append("Avoiding Danger\n")
 
-        block.append("===== Target Info: =====\n")
-        if (committedSpatialIntent == 1) { // If target intent
+        block.append("===== Targeting: =====\n")
+
             if (outputs[OutputIndex.SEX] > 0) block.append("Opposite Sex\n")
             else if (outputs[OutputIndex.SEX] < 0) block.append("Same Sex\n")
             else block.append("-----\n")
@@ -846,17 +946,13 @@ class Cortex(
             if (outputs[OutputIndex.HEALTH] > 0) block.append("Highest Health\n")
             else if (outputs[OutputIndex.HEALTH] < 0) block.append("Lowest Health\n")
             else block.append("-----\n")
-        } else {
-            block.append("-----\n")
-            block.append("-----\n")
-            block.append("-----\n")
-        }
+
         block.append("===== END =====\n")
         return block.toString()
     }
 
 
-    private val inputArrayClone = stateInputs.copyOf()
+    private val inputArrayClone = predictionStateInputs.copyOf()
     private val exActivity = FloatArray(activityNeurons)
 
     fun experimentalTargetAssessment(
@@ -868,7 +964,7 @@ class Cortex(
         hunger: Float
     ): Float {
 
-        stateInputs.copyInto(inputArrayClone)
+        predictionStateInputs.copyInto(inputArrayClone)
         inputArrayClone[State.Index.TARGET_HUE] = hue
         inputArrayClone[State.Index.TARGET_SEX] = sex
         inputArrayClone[State.Index.TARGET_VALENCE] = valence

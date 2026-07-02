@@ -14,8 +14,6 @@ import derivative.code.microswarm.network.Cortex
 import derivative.code.microswarm.network.CortexIndex
 import derivative.code.microswarm.network.Intents
 import derivative.code.microswarm.sinTable
-import kotlin.math.abs
-import kotlin.math.sign
 
 object Action {
 
@@ -40,6 +38,7 @@ object Action {
             when (choice) {
                 EAT -> {
                     val food = self.foodField ?: return
+                    self.networkAccess().actionExecuted = true
                     if (!self.digesting) {
                         food.value--
                         self.digesting = true
@@ -123,6 +122,7 @@ object Action {
             // Death related logic
             if (!target.enabled) return
             target.enabled = false
+            self.networkAccess().actionExecuted = true
 
             // Witnessed a killing
             var witnessValence = 0f
@@ -140,7 +140,7 @@ object Action {
             self.targetCooldown = 50
 
             Target.clearTarget(self)
-            if (target.hue == self.hue) Main.Companion.killedOwnHue.incrementAndGet()
+            if (target.hue == self.hue) Main.killedOwnHue.incrementAndGet()
             else Main.killedOtherHue.incrementAndGet()
 
             managePopHueCounter(target.hue, false)
@@ -158,6 +158,8 @@ object Action {
             val myHunger = 1 - (self.energy * INV_MAX_ENERGY)
 
             if (self.isMale != target.isMale) {
+
+                self.networkAccess().actionExecuted = true
 
                 val targetApproval = target.networkAccess().experimentalTargetAssessment(
                     sameHue, oppositeSex, myValenceAtTarget, isIncubating,
@@ -224,6 +226,8 @@ object Action {
             target.energy += ACTION_ENERGY_TRANSFER_AMT
             self.energy -= ACTION_ENERGY_TRANSFER_AMT
 
+            self.networkAccess().actionExecuted = true
+
             val significance = (ACTION_ENERGY_TRANSFER_AMT / target.energy.coerceAtLeast(0f)).coerceIn(0f, 1f)
 
             // Witnesses
@@ -249,6 +253,8 @@ object Action {
         private fun steal(self: Agent, target: Agent) {
             target.energy -= ACTION_ENERGY_TRANSFER_AMT
             self.energy += ACTION_ENERGY_TRANSFER_AMT
+
+            self.networkAccess().actionExecuted = true
 
             if (target.energy <= 0) {
                 kill(self, target)
@@ -319,13 +325,13 @@ object Action {
             // EAT and MATE is the only "save" non-consequential exploration decision, rest
             // needs to be gated behind reflex-like circumstances
 
-            val withinEatingRange = self.stateInputs[State.Index.IN_FOOD_FIELD] == 1f
-            val withinActionRadius = self.stateInputs[State.Index.WITHIN_ACTION_RADIUS] == 1f
+            val withinEatingRange = self.predictionStateInputs[State.Index.IN_FOOD_FIELD] == 1f
+            val withinActionRadius = self.predictionStateInputs[State.Index.WITHIN_ACTION_RADIUS] == 1f
 
-            val hungerWithNoFood = self.stateInputs[State.Index.HUNGER] > 0.7f && self.stateInputs[State.Index.RESOURCE_DIST] == 0f
-            val threatFromTarget = self.stateInputs[State.Index.TARGET_THREAT] > 0.5f
+            val hungerWithNoFood = self.predictionStateInputs[State.Index.HUNGER] > 0.7f && self.predictionStateInputs[State.Index.RESOURCE_DIST] == 0f
+            val threatFromTarget = self.predictionStateInputs[State.Index.TARGET_THREAT] > 0.5f
 
-            val wellFed = self.stateInputs[State.Index.HUNGER] < 0.3f
+            val wellFed = self.predictionStateInputs[State.Index.HUNGER] < 0.3f
 
             return getPossibleExploration(
                 withinEatingRange,
@@ -336,26 +342,10 @@ object Action {
             )
         }
 
-        fun actionEvaluation(self: Cortex, neurotransmitters: FloatArray) {
-            self.actionEvaluation = true
-
+        fun actionEvaluation(self: Cortex) {
             if (self.committedActionIntent == 0) return // No action committed
-
-            val prediction = self.output[CortexIndex.A_PREDICTION]
-
-            val delta = (neurotransmitters[1] - self.serotonin) - (neurotransmitters[0] - self.adrenaline)
-
-            val error = (delta - prediction).coerceIn(-1f, 1f)
-
-            val correction = if (self.committedActionIntent == self.bootstrappedActionIntent) delta
-            else abs(error) * sign(delta)
-
-            if (abs(error) > self.actionWeightGate) {
-                self.predictionSignalUpdate(error, CortexIndex.A_PREDICTION)
-                actionWeightUpdates(self, correction)
-                self.actionWeightGate = abs(error)
-            }
-            self.actionWeightGate -= 0.001f
+            self.actionEvaluation = true
+            self.backpropContribution()
             self.actionEvaluation = false
         }
 
@@ -451,7 +441,7 @@ object Action {
 
 
             for (a in 1..5) {
-                val survivalBypass = a == 3 && self.stateInputs[State.Index.HUNGER] > 0.4f
+                val survivalBypass = a == 3 && self.predictionStateInputs[State.Index.HUNGER] > 0.4f
                 self.actionHabituation[a] = when {
                     survivalBypass -> 1f
                     a == self.committedActionIntent -> (self.actionHabituation[a] * 0.996f).coerceAtLeast(0.3f)
@@ -459,65 +449,5 @@ object Action {
                 }
             }
         }
-
-
-        fun actionWeightUpdates(self: Cortex, error: Float) {
-            // Contribution calculation for pairs excluding movement axis
-            for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
-
-                if (self.eligibilityGate(i)) continue
-                    val contribution = self.calculateContribution(self.output[i].coerceIn(0f, 1f), skipGate = true)
-                    self.actionOutputContribution[i] += contribution * error
-            }
-
-
-            for (j in 0 until self.activityNeurons) {
-                val intentDPost = if (self.activity[j] > 0) 1f else 0.25f
-                var totalCorrection = 0f
-                for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
-                    totalCorrection += self.actionOutputContribution[i] * (self.outputWeights[i][j] + self.outputMemory[i][j])
-                }
-                self.actionActivityContribution[j] += totalCorrection * intentDPost *
-                        self.calculateContribution(self.activity[j], 0.1f)
-            }
-
-
-
-            for (i in CortexIndex.ACTION_INDEX_START..CortexIndex.ACTION_INDEX_END) {
-                if (self.eligibilityGate(i)) continue
-                for (j in 0 until self.activityNeurons) {
-                    val adaptiveWeightDecay =
-                        self.adaptiveWeightDecay(self.outputMemory[i][j],
-                            self.outputLayerDecayBase, self.outputLayerDecayMax)
-                    val delta = self.actionOutputContribution[i] * self.activity[j] * self.learningMultiplier
-                    self.outputMemory[i][j] = (self.outputMemory[i][j] * adaptiveWeightDecay + delta)
-                        .coerceIn(-self.maxMemory, self.maxMemory)
-                    if (abs(self.outputMemory[i][j]) > 0f)
-                        self.outputWeights[i][j] = (self.outputWeights[i][j] * self.convergenceRate) +
-                                ((1 - self.convergenceRate) * self.outputMemory[i][j])
-                }
-            }
-
-            for (j in 0 until self.activityNeurons) {
-                for (k in 0 until self.inputNeurons) {
-                    val adaptiveWeightDecay = self.weightDecay // 0.99985
-                    val delta = self.actionActivityContribution[j] * self.stateInputs[k] * self.learningMultiplier
-                    self.memoryIn[j][k] = (self.memoryIn[j][k] * adaptiveWeightDecay + delta)
-                        .coerceIn(-self.maxMemory, self.maxMemory)
-                    if (abs(self.memoryIn[j][k]) > 0f)
-                        self.weightsInput[j][k] = (self.weightsInput[j][k] * self.convergenceRate) +
-                                ((1 - self.convergenceRate) * self.memoryIn[j][k])
-
-                }
-            }
-
-            self.learningMultiplier = 1f
-
-
-            for (i in 0 until self.actionOutputContribution.size) self.actionOutputContribution[i] = 0f
-            for (i in 0 until self.actionActivityContribution.size) self.actionActivityContribution[i] = 0f
-        }
-
-
     }
 }

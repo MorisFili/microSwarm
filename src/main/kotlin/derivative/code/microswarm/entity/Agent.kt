@@ -79,7 +79,11 @@ open class Agent(
     var friendsInProximityCount = 0
     var foodInProximityCount = 0
     var recognizedFoodCount = 0
-    var targetCooldown = 0
+    var foodValueInProximity = 0f
+    var hostileDistance = 0f
+    var localAgentEnergyValue = 0f
+    var friendlyGroupSize = 0f
+    var threatState = 0f
 
     // Social Valence
     var globalPopularity = 0f
@@ -90,6 +94,8 @@ open class Agent(
     var TARGET: Agent? = null
     var targetDistance = 0f
     var targetPopularity = 0f
+    var targetBySelection = false
+    var targetCooldown = 0
 
 
     // Genetic traits
@@ -105,19 +111,27 @@ open class Agent(
     }
 
 
-    fun syncGenerateIntent() {
+    fun asyncGenerateEnvironment() {
         if (targetCooldown > 0) {
             targetCooldown--
         }
         if (INCUBATION_TIMER > 0f) INCUBATION_TIMER--
-        updateProximity()
-        State.generateState(this, currentState)
+        updateProximity() // async
+        State.generateEnvironmentState(this, currentState) // async
+        cortex.generateTargetPreferences(currentState, output) // async
+
+    }
+
+    fun syncTargetSelection() {
+        if (targetCooldown > 0) Target.clearTarget(this)
+        Target.selectTarget(this)
     }
 
     fun asyncFeedForward() {
+        State.updateTransmitters(this)
         cortex.generateIntent(currentState, output)
         State.intentToSpatialTransformation(this, preMotorInputs)
-        Target.selectTarget(this)
+        cortex.generatePrediction(output, targetBySelection)
         cortex.generateMovement(preMotorInputs, output)
     }
 
@@ -129,12 +143,14 @@ open class Agent(
             INCUBATING = false
             INCUBATION_TIMER = 0
         }
+        Target.refreshTargetInfo(this)
     }
 
     fun asyncStateEvaluation() {
+        State.generateEnvironmentState(this, currentState)
+        State.updateTransmitters(this)
         State.intentToSpatialTransformation(this, postMotorInputs)
-        State.generateState(this, currentState)
-        cortex.actionEvaluation(neurotransmitters)
+        cortex.actionEvaluation()
         cortex.stateEvaluation(neurotransmitters)
         cortex.movementEvaluation(preMotorInputs, postMotorInputs, output[OutputIndex.ROTATE])
 
@@ -222,7 +238,8 @@ open class Agent(
         INCUBATION_MATERIAL = null
         INCUBATION_TIMER = 0
         targetCooldown = 0
-        cortex.weightGate = 0f
+        cortex.positiveWeightGate = 0f
+        cortex.negativeWeightGate = 0f
         cortex.actionWeightGate = 0f
         Arrays.fill(interactionValence, 0f)
         Arrays.fill(interactionId, -1)

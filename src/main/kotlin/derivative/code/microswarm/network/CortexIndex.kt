@@ -24,17 +24,17 @@ object CortexIndex {
     const val S_FOOD = 6
     const val S_FRIEND = 7
     const val S_UNFAMILIAR = 8
-    const val S_UNFRIENDLY = 9
+    const val S_UNFRIENDLY = 9 // Excluded from gates
     const val P_SEX = 10
     const val P_VALENCE = 11
     const val P_HEALTH = 12
     const val S_PREDICTION = 13
-    const val A_PREDICTION = 14
 
     const val ACTION_INDEX_START = A_KILL
     const val ACTION_INDEX_END = A_STEAL
     const val SPATIAL_INDEX_START = S_TARGET
-    const val SPATIAL_INDEX_END = S_UNFRIENDLY
+    const val SPATIAL_INDEX_END = S_UNFAMILIAR
+    const val FEEDFORWARD_END = P_HEALTH
 
 }
 
@@ -55,5 +55,4 @@ object OutputIndex {
     const val VALENCE = 13
     const val HEALTH = 14
     const val S_PREDICTION = 15
-    const val A_PREDICTION = 16
 }
