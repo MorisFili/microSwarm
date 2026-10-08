@@ -1,14 +1,16 @@
 package derivative.code.microswarm.entity
-
+import derivative.code.microswarm.DETECTION_RADIUS_SQ
 import derivative.code.microswarm.Main
+import derivative.code.microswarm.PRESENCE_CAP
 import derivative.code.microswarm.Simulation
-import derivative.code.microswarm.network.Network
+import derivative.code.microswarm.Simulation.Companion.rng
+import derivative.code.microswarm.managePopHueCounter
+import derivative.code.microswarm.modules.Action
+import derivative.code.microswarm.network.Cortex
+import derivative.code.microswarm.network.OutputIndex
 import javafx.scene.paint.Color
 import java.util.Arrays
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.random.Random
 
 
 open class Agent(
@@ -19,43 +21,89 @@ open class Agent(
     // Attributes
     id: Int,
     hue: Color,
-    enabled: Boolean = true,
-    private val network: Network
-) : Entity(id, x, y, hue, enabled) {
+    isEnabled: Boolean = true,
+    private val cortex: Cortex
+) : Entity(id, x, y, hue, isEnabled) {
 
-    // Field variables
-    val detectionRadius = 35f
-    val PRESENCE_CAP = 50
-    val inProximity = arrayOfNulls<Agent>(PRESENCE_CAP)
-    val actionRadiusSq = 4f
-    var withinActionRadius = false
-    val targetRadiusSq = 200f
-    var TARGET: Entity? = null
+    // Float Arrays
+    val agentsInProximity = arrayOfNulls<Agent>(PRESENCE_CAP)
+    val entitiesInProximity = arrayOfNulls<Entity>(5)
+    val targetedBy = arrayOfNulls<Agent>(20)
+    val currentState = FloatArray(cortex.inputStates)
+
+    val preMotorInputs = FloatArray(cortex.motionInputs)
+    val postMotorInputs = FloatArray(cortex.motionInputs)
+    var output = FloatArray(cortex.networkOutputs)
+    val metaData = FloatArray(20)
+    val movementMetaData = FloatArray(1)
+    val interactionId = IntArray(128) { -1 }
+    val interactionValence = FloatArray(128)
+    val neurotransmitters = FloatArray(2)
+
+    // state EMA
+    val stateEMA = FloatArray(4)
+    val ownEnergyDelta = 0
+    val hostileDistDelta = 1
+    val groupStress = 2
+    val familiarRatio = 3
+
+
+    // Local pointers
+    var foodField: Food? = null
+    var INCUBATION_MATERIAL: GeneticMaterial? = null
+    val action = Action.Perform
+
+
+    // Local variables
+    var foodFieldDistance = 1f
     var MATE_CONDITION = false
-    val preState = FloatArray(network.networkInput)
-    val postState = FloatArray(network.networkInput)
+    var INCUBATING = false
+    var INCUBATION_TIMER = 0
+    var INCUBATION_LENGTH = 444
+    var withinActionRadius = false
     var facingX = 0f
-    var facingY = 0f
-    var output = FloatArray(network.networkOutput)
+    var facingY = 1f
+    var explorationTargetX = 0f
+    var explorationTargetY = 0f
+    var energy = 80f
+    var digesting = false
+    var digestionTimer = 0
+
+    // Snapshots
+    var PRE_ENERGY_SNAP = 80f
+    var PRE_HOSTILE_DIST = -1f
+
 
     // Social features
-    var PRESENCE_COUNT = 0
-    var CREDIT = 0
-    var RENEGADE = 0f
+    var agentsInProximityCount = 0
+    var friendsInProximityCount = 0
+    var foodInProximityCount = 0
+    var recognizedFoodCount = 0
+    var foodValueInProximity = 0f
+    var hostileDistance = 0f
+    var localAgentEnergyValue = 0f
+    var friendlyGroupSize = 0f
+    var threatState = 0f
 
-    // Economy calculations
-    val reproductionCost = 200
-    var refractoryPeriod = 200
-    val creditHorizonMultiplier = 15f // How many actions the state value can store
-    val creditDenominator = reproductionCost * creditHorizonMultiplier
+    // Social Valence
+    var globalPopularity = 0f
+    var localPopularity = 0f
+
+
+    // Target pointers
+    var TARGET: Agent? = null
+    var targetDistance = 0f
+    var targetPopularity = 0f
+    var targetBySelection = false
+    var targetCooldown = 0
+
 
     // Genetic traits
-    var sex = false
-    var apathic = false
+    var isMale = false
+
 
     fun randomizeTraits() {
-        sex = Random.nextFloat() < 0.5
-        apathic = Random.nextFloat() < 0.1
+        isMale = rng.nextFloat() < 0.5
     }
 
     init {
@@ -63,346 +111,147 @@ open class Agent(
     }
 
 
-    fun asyncGenerateIntent() {
-        if (RENEGADE > 0) RENEGADE -= 0.005f
-        if (refractoryPeriod > 0) refractoryPeriod--
-        updateProximity()
-        generateState(preState)
-        output = network.feedForward(preState)
+    fun asyncGenerateEnvironment() {
+        if (targetCooldown > 0) {
+            targetCooldown--
+        }
+        if (INCUBATION_TIMER > 0f) INCUBATION_TIMER--
+        updateProximity() // async
+        State.generateEnvironmentState(this, currentState) // async
+        cortex.generateTargetPreferences(currentState, output) // async
+
+    }
+
+    fun syncTargetSelection() {
+        if (targetCooldown > 0) Target.clearTarget(this)
+        Target.selectTarget(this)
+    }
+
+    fun asyncFeedForward() {
+        State.updateTransmitters(this)
+        cortex.generateIntent(currentState, output)
+        State.intentToSpatialTransformation(this, preMotorInputs)
+        cortex.generatePrediction(output, targetBySelection)
+        cortex.generateMovement(preMotorInputs, output)
     }
 
     fun syncPerformAction() {
-        action(output[2], output[3], output[4])
-        if (apathic) network.valence.coerceAtLeast(0f)
-    }
-    fun asyncActionEvaluation() {
-        network.actionEvaluation()
-    }
-    fun syncMovement() {
-        move(output[0], output[1])
-    }
-    fun asyncStateEvaluation() {
-        generateState(postState)
-        network.stateEvaluation(preState, postState)
+        action.move(this, output[OutputIndex.ROTATE], output[OutputIndex.DRIVE])
+        action.performAction(this)
+        if (INCUBATING && INCUBATION_TIMER < 1f) {
+            if (INCUBATION_MATERIAL != null) MATE_CONDITION = true
+            INCUBATING = false
+            INCUBATION_TIMER = 0
+        }
+        Target.refreshTargetInfo(this)
     }
 
+    fun asyncStateEvaluation() {
+        State.generateEnvironmentState(this, currentState)
+        State.updateTransmitters(this)
+        State.intentToSpatialTransformation(this, postMotorInputs)
+        cortex.actionEvaluation()
+        cortex.stateEvaluation(neurotransmitters)
+        cortex.movementEvaluation(preMotorInputs, postMotorInputs, output[OutputIndex.ROTATE])
+
+        if (digesting) {
+            energy++
+            digestionTimer--
+            digesting = digestionTimer > 0
+        }
+        energy -= if (INCUBATING) 0.1f else 0.01f
+        if (energy <= 0f) starvation()
+    }
+
+
+    fun networkAccess(): Cortex {return cortex}
+
+
+    fun starvation() {
+        enabled = false
+        managePopHueCounter(hue, false)
+        Main.populationCounter.decrementAndGet()
+        Main.starvationCounter.incrementAndGet()
+        Simulation.occupancyGrid[x.toInt()][y.toInt()] = false // clear occupancy
+    }
 
     fun analysis(): String {
-        return network.analysis(postState)
+        return cortex.analysis(currentState, output, neurotransmitters)
     }
 
-    fun exportWeights(): Network.WeightsPackage {
-        return network.extractWeightsForReproduction()
+    fun exportWeights(): Cortex.WeightsPackage {
+        return cortex.extractWeightsForReproduction()
     }
 
-    fun importWeights(weightsPackage: Network.WeightsPackage) {
-        network.importWeights(weightsPackage)
+    fun importWeights(weightsPackage: Cortex.WeightsPackage) {
+        cortex.importWeights(weightsPackage)
     }
 
-    private fun generateState(state: FloatArray) {
-        var sameCount = 0f
-        var sameDX = 0f
-        var sameDY = 0f
 
-        var otherCount = 0f
-        var otherDX = 0f
-        var otherDY = 0f
 
-        var renegadeCount = 0f
-        var renegadeValue = 0f
-        var renegadeDX = 0f
-        var renegadeDY = 0f
-
-        var societalCredit = 0f
-
-        // If target is out of target range remove
-        if (TARGET != null) {
-            val target = TARGET as Entity
-            val dx = target.x - x
-            val dy = target.y - y
-            val targetDistSq = dx * dx + dy * dy
-            if (targetDistSq > targetRadiusSq) TARGET = null // target lost
-            if (!target.enabled) TARGET = null
+    fun memoryDecay() {
+        var compactionNeeded = false
+        for (i in 0 until interactionValence.size) {
+            interactionValence[i] *= 0.9954f
+            if (interactionId[i] != -1 && abs(interactionValence[i]) < 0.005f) {
+                interactionValence[i] = 0f
+                interactionId[i] = -1
+                compactionNeeded = true
+            }
         }
+        globalPopularity *= 0.9954f
+        if (abs(globalPopularity) < 1e-6f) globalPopularity = 0f
+        if (compactionNeeded) rehashInteractionTable()
+    }
 
-        var closestTarget: Entity? = null
-        var closestDistSq = 1000f
-        val moveLenSq = facingX * facingX + facingY * facingY
+    private fun rehashInteractionTable() {
 
-        for (entity in inProximity) {
-            if (entity == null) continue
-            if (!entity.enabled) continue
-            val dx = entity.x - x
-            val dy = entity.y - y
-            val distSq = dx * dx + dy * dy
-
-            if (entity.hue == hue) {
-                sameCount++
-                sameDX += dx
-                sameDY += dy
-            } else {
-                otherCount++
-                otherDX += dx
-                otherDY += dy
-            }
-
-            if (entity.RENEGADE > 0) {
-                renegadeCount++
-                renegadeDX += dx
-                renegadeDY += dy
-                renegadeValue += entity.RENEGADE
-            }
-
-            societalCredit += entity.CREDIT
-
-            // Target assignment
-            if (TARGET != null) continue
-            if (distSq > 0.00001f && moveLenSq > 0.000001f &&
-                distSq < targetRadiusSq && distSq < closestDistSq
-            ) {
-                val forward = facingX * dx + facingY * dy
-                if (forward > 0 && forward * forward > distSq * moveLenSq * 0.25f) {
-                    closestTarget = entity
-                    closestDistSq = distSq
-                }
+        val ids = IntArray(128)
+        val vals = FloatArray(128)
+        var count = 0
+        for (i in 0 until 128) {
+            if (interactionId[i] != -1) {
+                ids[count] = interactionId[i]
+                vals[count] = interactionValence[i]
+                count++
             }
         }
 
-        if (TARGET == null) TARGET = closestTarget
-
-        // Action radius check
-        if (TARGET != null) {
-            val target = TARGET as Entity
-            val dx = target.x - x
-            val dy = target.y - y
-            val targetDistSq = dx * dx + dy * dy
-            if (targetDistSq > 0.000001f && targetDistSq <= actionRadiusSq) {
-                val moveLenSq = facingX * facingX + facingY * facingY
-                if (moveLenSq > 0.000001f) {
-                    val forward = facingX * dx + facingY * dy
-                    if (forward > 0 && forward * forward > targetDistSq * moveLenSq * 0.25f) {
-                        withinActionRadius = true
-                    } else withinActionRadius = false
-                }
-            }
-        }
-
-        //val avgSocietalCredit = if (sameCount + otherCount > 0) societalCredit / (sameCount + otherCount) else 0f
-
-        // 1 -> neuron is on, casts vote to influence if state is true
-        // 0 -> neuron is off, doesnt vote because state is false/not relevant
-        // -1 -> neuron is on, contribute negatively when state is true
-
-        val sameHueCenterDX =
-            if (sameCount > 0) (sameDX / sameCount) / detectionRadius else 0f
-
-        val sameHueCenterDY =
-            if (sameCount > 0) (sameDY / sameCount) / detectionRadius else 0f
-
-        val sameHueDistance = if (sameCount > 0) {
-            val avgDX = sameDX / sameCount
-            val avgDY = sameDY / sameCount
-
-            val dist = cheapDistance(avgDX, avgDY)
-
-            (1f - dist / detectionRadius)
-        } else 0f
-
-
-        val otherHueCenterDX =
-            if (otherCount > 0) (otherDX / otherCount) / detectionRadius else 0f
-
-        val otherHueCenterDY =
-            if (otherCount > 0) (otherDY / otherCount) / detectionRadius else 0f
-
-        val otherHueDistance = if (otherCount > 0) {
-            val avgDX = otherDX / otherCount
-            val avgDY = otherDY / otherCount
-
-            val dist = cheapDistance(avgDX, avgDY)
-
-            (1f - dist / detectionRadius)
-        } else 0f
-
-        val sameHueGroupStrength = (sameCount / (PRESENCE_CAP / 3f))
-        val otherHueGroupStrength = (otherCount / (PRESENCE_CAP / 3f))
-
-        val renegadeCenterDX =
-            if (renegadeCount > 0) (renegadeDX / renegadeCount) / detectionRadius else 0f
-        val renegadeCenterDY =
-            if (renegadeCount > 0) (renegadeDY / renegadeCount) / detectionRadius else 0f
-        val renegadeDistance = if (renegadeCount > 0) {
-            val avgDX = renegadeDX / renegadeCount
-            val avgDY = renegadeDY / renegadeCount
-
-            val dist = cheapDistance(avgDX, avgDY)
-
-            (1f - dist / detectionRadius)
-        } else 0f
-        val renegadeStrength = renegadeValue / (PRESENCE_CAP / 3f)
-
-        val target = TARGET as Agent?
-        val targetDX = if (target != null) (target.x - x) / 14.14f else 0f
-        val targetDY = if (target != null) (target.y - y) / 14.14f else 0f
-
-        val totalCount = sameCount + otherCount
-        val crowdingState = ((totalCount - (PRESENCE_CAP / 3f)) / (PRESENCE_CAP / 3f))
-        val aloneState = -crowdingState
-
-        // Latest = 22
-        state[0] = 1f // Bias/drive state, always on
-
-        // Directional symmetry states (-1f, 1f)
-        state[1] = sameHueCenterDX.coerceIn(-1f, 1f)
-        state[2] = sameHueCenterDY.coerceIn(-1f, 1f)
-        state[5] = otherHueCenterDX.coerceIn(-1f, 1f)
-        state[6] = otherHueCenterDY.coerceIn(-1f, 1f)
-        state[11] = renegadeCenterDX.coerceIn(-1f, 1f)
-        state[12] = renegadeCenterDY.coerceIn(-1f, 1f)
-        state[20] = targetDX.coerceIn(-1f, 1f)
-        state[21] = targetDY.coerceIn(-1f, 1f)
-
-        // Unilateral states
-        state[3] = sameHueDistance.coerceIn(0f, 1f) // Sensory, no eval
-        state[4] = sameHueGroupStrength.coerceIn(0f, 1f)
-        state[7] = otherHueDistance.coerceIn(0f, 1f) // Sensory, no eval
-        state[8] = otherHueGroupStrength.coerceIn(0f, 1f)
-        state[13] = renegadeDistance.coerceIn(0f, 1f) // Sensory, no eval
-        state[14] = renegadeStrength.coerceIn(0f, 1f)
-        state[18] = crowdingState.coerceIn(0f, 1f)
-        state[19] = aloneState.coerceIn(0f, 1f)
-
-        // Self-sensory states
-        state[10] = (CREDIT / creditDenominator).coerceIn(0f, 1f)
-        state[17] = if (RENEGADE > 0) 1f else 0f
-
-        // Target sensory
-        state[9] = if (target == null) 0f else if (target.hue == hue) 1f else -1f
-        state[15] = if (target == null) 0f else if (target.sex != sex) 1f else -1f
-        state[16] = if (target == null) 0f else if (target.RENEGADE > 0) 1f else 0f
-        state[22] = if (withinActionRadius) 1f else 0f
-
-    }
-
-    private fun cheapDistance(a: Agent, b: Agent): Float {
-        // Rough Euclidean approximation using magical numbers, ca 4.4% inaccuracy
-        val dx = abs(a.x - b.x)
-        val dy = abs(a.y - b.y)
-
-        val maxD = max(dx, dy)
-        val minD = min(dx, dy)
-
-        return 0.96043384f * maxD + 0.39782473f * minD
-    }
-
-    private fun cheapDistance(dx: Float, dy: Float): Float {
-        val ax = abs(dx)
-        val ay = abs(dy)
-
-        val maxD = max(ax, ay)
-        val minD = min(ax, ay)
-
-        return 0.96043384f * maxD + 0.39782473f * minD
-    }
-
-    private fun action(kill: Float, mate: Float, work: Float) {
-
-        if (maxOf(kill, mate, work) > network.ACTION_THRESHOLD) {
-
-            if (work >= mate && work >= kill) {
-                CREDIT += 1 * PRESENCE_COUNT
-                return
-            }
-
-            if (TARGET == null || !withinActionRadius) {
-                if (!network.intentWithoutAction) network.valence -= 0.1f
-                return
-            }
-            if (TARGET is Agent) {
-                val target = TARGET as Agent
-                if (mate >= kill) {
-                    if (sex != target.sex) {
-                        network.valence += 0.3f
-                        if (CREDIT >= reproductionCost &&
-                            refractoryPeriod == 0 &&
-                            !network.intentWithoutAction) {
-
-                            MATE_CONDITION = true
-                            CREDIT -= reproductionCost
-                            refractoryPeriod = 200
-                            network.valence += 1f
-                            TARGET = null
-                        }
-
-                    }
-                } else {
-                    network.valence -= 0.3f
-                    if (target.hue == hue) {
-                        if (!network.intentWithoutAction) {
-                            network.valence -= 0.5f
-                            RENEGADE += 10
-                            Main.killedOwnHue.incrementAndGet()
-                        }
-                    } else {
-                        if (!network.intentWithoutAction) {
-                            RENEGADE += 2f
-                            Main.killedOtherHue.incrementAndGet()
-                        }
-                    }
-                    if (target.RENEGADE > 0) network.valence += 1f
-                    if (!network.intentWithoutAction) {
-                        CREDIT += target.CREDIT
-                        target.CREDIT = 0
-                        target.enabled = false
-                        TARGET = null
-                        Main.populationCounter.decrementAndGet()
-                    }
-
-                }
-            }
-
+        interactionId.fill(-1)
+        interactionValence.fill(0f)
+        for (k in 0 until count) {
+            var idx = ids[k] and 127
+            while (interactionId[idx] != -1) idx = (idx + 1) and 127
+            interactionId[idx] = ids[k]
+            interactionValence[idx] = vals[k]
         }
     }
 
-    private fun move(nx: Float, ny: Float) {
-        var newX = x + nx
-        var newY = y + ny
 
-        if (newX >= 999.99f) newX -= 999.99f
-        if (newX < 0f) newX += 999.99f
-        if (newY >= 999.99f) newY -= 999.99f
-        if (newY < 0f) newY += 999.99f
-
-        // Occupancy check
-        val gridX = newX.toInt()
-        val gridY = newY.toInt()
-        Simulation.occupancyGrid[x.toInt()][y.toInt()] = false // clear old occupancy
-
-        if (Simulation.occupancyGrid[gridX][gridY]) { // If new position is occupied
-            // Try X
-            if (!Simulation.occupancyGrid[gridX][y.toInt()]) {
-                facingX = newX - x
-                x = newX
-            }
-            // Try Y
-            if (!Simulation.occupancyGrid[x.toInt()][gridY]) {
-                facingY = newY - y
-                y = newY
-            }
-        } else {
-            facingX = newX - x
-            facingY = newY - y
-            x = newX
-            y = newY
-        }
-        Simulation.occupancyGrid[x.toInt()][y.toInt()] = true
-
+    fun resetState() {
+        energy = 60f
+        enabled = true
+        TARGET = null
+        MATE_CONDITION = false
+        withinActionRadius = false
+        INCUBATING = false
+        INCUBATION_MATERIAL = null
+        INCUBATION_TIMER = 0
+        targetCooldown = 0
+        cortex.positiveWeightGate = 0f
+        cortex.negativeWeightGate = 0f
+        cortex.actionWeightGate = 0f
+        Arrays.fill(interactionValence, 0f)
+        Arrays.fill(interactionId, -1)
     }
 
     private fun updateProximity() {
 
-        Arrays.fill(inProximity, null)
-        PRESENCE_COUNT = 0
+        Arrays.fill(agentsInProximity, null)
+        Arrays.fill(entitiesInProximity, null)
+        agentsInProximityCount = 0
+        foodInProximityCount = 0
+
 
         val gx = (x / Simulation.CELL_SIZE).toInt()
         val gy = (y / Simulation.CELL_SIZE).toInt()
@@ -421,11 +270,19 @@ open class Agent(
                     val dy = this.y - other.y
                     val distSq = dx * dx + dy * dy
 
-                    if (distSq < detectionRadius * detectionRadius) { // suggestions: different radii for different purposes
-                        if (PRESENCE_COUNT < PRESENCE_CAP) {
-                            inProximity[PRESENCE_COUNT] = other as Agent
-                            PRESENCE_COUNT++
-                        } else break@scan
+                    if (distSq < DETECTION_RADIUS_SQ) { // suggestions: different radii for different purposes
+                        if (agentsInProximityCount < PRESENCE_CAP) {
+                            if (other is Agent) {
+                                agentsInProximity[agentsInProximityCount] = other
+                                agentsInProximityCount++
+                            }
+                        }
+                        if (foodInProximityCount < 5) {
+                            if (other is Food) {
+                                entitiesInProximity[foodInProximityCount] = other
+                                foodInProximityCount++
+                            }
+                        }
                     }
                 }
             }
